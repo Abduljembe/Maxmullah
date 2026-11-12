@@ -1,0 +1,6 @@
+{
+  "name": "MullahMax — Unified Movies & Series Hub",
+  "description": "Stream movies and series across Netflix, Max, Disney+, Apple TV+, Prime Video and more in one unified interface with offline viewing and personalized taste recommendations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
