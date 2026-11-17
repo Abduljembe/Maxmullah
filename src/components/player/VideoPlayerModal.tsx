@@ -32,6 +32,7 @@ import {
   saveVideoProviderConfig,
   getNextFastestServer,
   fetchLiveServerSources,
+  saveCustomDirectStream,
   LiveServerSourcesResponse,
 } from '../../services/videoProviderService';
 import { prewarmStreamUrl } from '../../utils/adBlocker';
@@ -104,19 +105,42 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [showEpisodeDrawer, setShowEpisodeDrawer] = useState(false);
 
   const controlsTimeoutRef = useRef<number | null>(null);
+  const userManuallyPickedServerRef = useRef(false);
 
-  // Probe live PrimeSrc & VixSrc host availability for the active title/episode
+  // Probe live direct stream registry + VidLink, VixSrc, PrimeSrc availability & resolve IMDb ID
   useEffect(() => {
     let cancelled = false;
     fetchLiveServerSources(media, currentSeason, currentEpisode).then((res) => {
-      if (!cancelled) {
-        setLiveSources(res);
+      if (cancelled) return;
+      setLiveSources(res);
+
+      // Prefer saved direct CDN/HLS stream (.m3u8/.mp4) when mapped for 0-ad native playback
+      if (res.directStreamUrl && isDirectStreamUrl(res.directStreamUrl)) {
+        setCustomStreamUrl(res.directStreamUrl);
+        if (!isOffline) {
+          setPlayerMode('native');
+        }
+        return;
+      }
+
+      // Otherwise auto-route to a verified playable server if current server lacks this title
+      if (!userManuallyPickedServerRef.current && res.recommendedServer) {
+        const currentIsVerified =
+          (selectedServer === 'vidlink' && res.vidlinkAvailable) ||
+          (selectedServer === 'vixsrc' && res.vixsrcAvailable) ||
+          (selectedServer === 'primesrc' && res.primeSrcHosts.length > 0);
+
+        if (!currentIsVerified && res.recommendedServer !== selectedServer) {
+          setSelectedServer(res.recommendedServer);
+          setIframeLoaded(false);
+          setIframeKey((k) => k + 1);
+        }
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [media, currentSeason, currentEpisode]);
+  }, [media, currentSeason, currentEpisode, isOffline]);
 
   // Silent background failover if an embed frame stalls without loading for 6.5s
   useEffect(() => {
@@ -139,9 +163,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     (e) => e.episodeNumber === currentEpisode
   );
 
+  // Merge resolved IMDb ID for searched titles so IMDb-only backup mirrors always match
+  const resolvedMedia: MediaItem =
+    liveSources?.resolvedImdbId && !media.imdbId
+      ? { ...media, imdbId: liveSources.resolvedImdbId }
+      : media;
+
   // Generate stream source cleanly under the hood
   const activeStreamSource = generateStreamSource(
-    media,
+    resolvedMedia,
     currentSeason,
     currentEpisode,
     selectedServer
@@ -199,6 +229,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       currentEpisode < (activeSeason?.episodes.length || 10));
 
   const handleSelectServer = (serverId: AnyServerId) => {
+    userManuallyPickedServerRef.current = true;
     setSelectedServer(serverId);
     setShowSourceMenu(false);
     setPlayerMode('stream');
@@ -736,6 +767,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
                             <span className="truncate">{server.name}</span>
+                            {server.id === 'vidlink' && liveSources?.vidlinkAvailable && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                            )}
                             {server.id === 'vixsrc' && liveSources?.vixsrcAvailable && (
                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
                             )}
@@ -767,15 +801,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       className="flex-1 bg-black/50 border border-white/15 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
                     />
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         if (isDirectStreamUrl(customStreamUrl)) {
                           setPlayerMode('native');
                           setShowSourceMenu(false);
+                          await saveCustomDirectStream(
+                            resolvedMedia,
+                            customStreamUrl,
+                            currentSeason,
+                            currentEpisode
+                          );
                         }
                       }}
-                      className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs cursor-pointer"
+                      className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs cursor-pointer whitespace-nowrap"
                     >
-                      Play
+                      Save &amp; Play
                     </button>
                     {isDirectStreamUrl(customStreamUrl) && (
                       <button

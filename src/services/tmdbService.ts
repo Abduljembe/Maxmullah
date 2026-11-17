@@ -26,6 +26,43 @@ export function saveTMDBApiKey(key: string) {
   } catch {}
 }
 
+/**
+ * Fetches any TMDB v3 endpoint reliably via the backend /api/tmdb/* proxy first
+ * (avoids browser CORS/ISP throttling and uses server TMDB_API_KEY), falling back to direct TMDB.
+ */
+async function tmdbFetchJson<T = Record<string, unknown>>(
+  tmdbPath: string,
+  paramsObj: Record<string, string | number | boolean> = {}
+): Promise<T | null> {
+  const key = getTMDBApiKey();
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(paramsObj)) {
+    qs.set(k, String(v));
+  }
+  if (key && key !== DEFAULT_PUBLIC_TMDB_KEY) {
+    qs.set('api_key', key);
+  }
+
+  try {
+    const proxyRes = await fetch(`/api/tmdb/${tmdbPath}?${qs.toString()}`);
+    if (proxyRes.ok) {
+      return (await proxyRes.json()) as T;
+    }
+  } catch {}
+
+  if (key) {
+    try {
+      qs.set('api_key', key);
+      const directRes = await fetch(`${TMDB_BASE_URL}/${tmdbPath}?${qs.toString()}`);
+      if (directRes.ok) {
+        return (await directRes.json()) as T;
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
 const TMDB_GENRES: Record<number, string> = {
   28: 'Action',
   12: 'Adventure',
@@ -73,6 +110,8 @@ function mapProviderNameToPlatform(providerName: string): StreamingPlatform | nu
 
 interface RawTMDBItem {
   id: number;
+  moviedb_id?: number;
+  imdb_id?: string;
   title?: string;
   name?: string;
   media_type?: string;
@@ -83,7 +122,7 @@ interface RawTMDBItem {
   overview?: string;
   vote_average: number;
   genre_ids?: number[];
-  genres?: { id: number; name: string }[];
+  genres?: (string | { id: number; name: string })[];
   tagline?: string;
   credits?: {
     cast?: { name: string }[];
@@ -110,7 +149,11 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
 
   const genres: string[] = [];
   if (raw.genres) {
-    genres.push(...raw.genres.map((g) => g.name));
+    genres.push(
+      ...raw.genres
+        .map((g) => (typeof g === 'string' ? g : g.name))
+        .filter(Boolean)
+    );
   } else if (raw.genre_ids) {
     raw.genre_ids.forEach((id) => {
       if (TMDB_GENRES[id]) genres.push(TMDB_GENRES[id]);
@@ -151,12 +194,22 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
   const platforms = Array.from(platformsSet);
   const primaryPlatform = platforms[0] || 'Netflix';
 
+  const posterFallbackSvg =
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><rect width="400" height="600" fill="#0e121b"/><rect x="150" y="250" width="100" height="100" rx="20" fill="#1e293b"/><polygon points="188,280 188,320 222,300" fill="#e11d48"/></svg>'
+    );
+
   const posterUrl = raw.poster_path
-    ? `${TMDB_IMAGE_BASE}/w500${raw.poster_path}`
-    : 'https://images.unsplash.com/photo-1517604931442-7e0c8ed2963c?auto=format&fit=crop&w=800&q=80';
+    ? raw.poster_path.startsWith('http')
+      ? raw.poster_path
+      : `${TMDB_IMAGE_BASE}/w500${raw.poster_path}`
+    : posterFallbackSvg;
 
   const backdropUrl = raw.backdrop_path
-    ? `${TMDB_IMAGE_BASE}/original${raw.backdrop_path}`
+    ? raw.backdrop_path.startsWith('http')
+      ? raw.backdrop_path
+      : `${TMDB_IMAGE_BASE}/original${raw.backdrop_path}`
     : posterUrl;
 
   const cast: string[] = [];
@@ -178,10 +231,21 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
   const imdbScore = Math.max(6.0, Math.min(9.5, Number((raw.vote_average || 7.5).toFixed(1))));
   const rottenTomatoesScore = Math.min(99, Math.max(60, Math.round(imdbScore * 10.5)));
 
+  const resolvedTmdbId =
+    raw.moviedb_id && raw.moviedb_id > 0
+      ? raw.moviedb_id
+      : raw.id && raw.id > 0
+      ? raw.id
+      : undefined;
+  const resolvedImdbId = raw.imdb_id || undefined;
+  const itemId = resolvedTmdbId
+    ? `tmdb-${type}-${resolvedTmdbId}`
+    : resolvedImdbId || `media-${type}-${title.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+
   return {
-    id: `tmdb-${type}-${raw.id}`,
-    tmdbId: raw.id,
-    imdbId: (raw as { imdb_id?: string }).imdb_id || undefined,
+    id: itemId,
+    tmdbId: resolvedTmdbId,
+    imdbId: resolvedImdbId,
     title,
     type,
     year,
@@ -249,15 +313,20 @@ function normalizeTVMazeShow(show: TVMazeShow): MediaItem {
   }
 
   const platforms = Array.from(platformsSet);
+  const fallbackSvg =
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><rect width="400" height="600" fill="#0e121b"/><rect x="150" y="250" width="100" height="100" rx="20" fill="#1e293b"/><polygon points="188,280 188,320 222,300" fill="#e11d48"/></svg>'
+    );
+
   const posterUrl =
     show.image?.original ||
     show.image?.medium ||
-    'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80';
+    fallbackSvg;
 
   return {
     id: `tvm-${show.id}`,
     imdbId: show.externals?.imdb || undefined,
-    tmdbId: show.externals?.thetvdb || undefined,
     title: show.name,
     type: 'series',
     year,
@@ -315,39 +384,34 @@ export async function fetchServerMovies(options: {
   sortBy?: string;
 }): Promise<FetchServerMoviesResult> {
   const { feed = 'popular', page = 1, genreId, query, sortBy = 'popularity.desc' } = options;
-  const key = getTMDBApiKey();
 
   try {
-    let url = '';
+    let data: { results?: RawTMDBItem[]; total_pages?: number; total_results?: number } | null = null;
     if (query && query.trim()) {
-      url = `${TMDB_BASE_URL}/search/movie?api_key=${key}&query=${encodeURIComponent(
-        query.trim()
-      )}&page=${page}&include_adult=false`;
+      data = await tmdbFetchJson('search/movie', {
+        query: query.trim(),
+        page,
+        include_adult: false,
+      });
     } else if (genreId && genreId > 0) {
-      url = `${TMDB_BASE_URL}/discover/movie?api_key=${key}&with_genres=${genreId}&sort_by=${sortBy}&page=${page}&include_adult=false`;
+      data = await tmdbFetchJson('discover/movie', {
+        with_genres: genreId,
+        sort_by: sortBy,
+        page,
+        include_adult: false,
+      });
     } else {
-      switch (feed) {
-        case 'trending':
-          url = `${TMDB_BASE_URL}/trending/movie/week?api_key=${key}&page=${page}`;
-          break;
-        case 'top_rated':
-          url = `${TMDB_BASE_URL}/movie/top_rated?api_key=${key}&page=${page}`;
-          break;
-        case 'now_playing':
-          url = `${TMDB_BASE_URL}/movie/now_playing?api_key=${key}&page=${page}`;
-          break;
-        case 'popular':
-        default:
-          url = `${TMDB_BASE_URL}/movie/popular?api_key=${key}&page=${page}`;
-          break;
-      }
+      const pathMap: Record<MovieFeedType, string> = {
+        trending: 'trending/movie/week',
+        top_rated: 'movie/top_rated',
+        now_playing: 'movie/now_playing',
+        popular: 'movie/popular',
+      };
+      data = await tmdbFetchJson(pathMap[feed] || 'movie/popular', { page });
     }
 
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      const rawResults: RawTMDBItem[] = data.results || [];
-      const items: MediaItem[] = rawResults
+    if (data && Array.isArray(data.results)) {
+      const items: MediaItem[] = data.results
         .filter((raw) => Boolean(raw.title && (raw.poster_path || raw.backdrop_path)))
         .map((raw) => normalizeTMDBItem(raw, 'movie'));
 
@@ -359,7 +423,7 @@ export async function fetchServerMovies(options: {
       };
     }
   } catch (err) {
-    console.warn('Error fetching server movies from TMDB:', err);
+    console.warn('Error fetching server movies:', err);
   }
 
   return { items: [], totalPages: 1, totalResults: 0, page };
@@ -370,17 +434,11 @@ export async function fetchServerMovies(options: {
  * Merges and deduplicates popular, top_rated, trending, and now_playing feeds.
  */
 export async function fetchAllServerMoviesMultiFeed(page = 1): Promise<MediaItem[]> {
-  const key = getTMDBApiKey();
-  const endpoints = [
-    `${TMDB_BASE_URL}/movie/popular?api_key=${key}&page=${page}`,
-    `${TMDB_BASE_URL}/trending/movie/week?api_key=${key}&page=${page}`,
-    `${TMDB_BASE_URL}/movie/top_rated?api_key=${key}&page=${page}`,
-    `${TMDB_BASE_URL}/movie/now_playing?api_key=${key}&page=${page}`,
-  ];
+  const paths = ['movie/popular', 'trending/movie/week', 'movie/top_rated', 'movie/now_playing'];
 
   try {
     const responses = await Promise.allSettled(
-      endpoints.map((url) => fetch(url).then((r) => (r.ok ? r.json() : null)))
+      paths.map((p) => tmdbFetchJson<{ results?: RawTMDBItem[] }>(p, { page }))
     );
 
     const map = new Map<number, MediaItem>();
@@ -424,39 +482,34 @@ export async function fetchServerSeries(options: {
   sortBy?: string;
 }): Promise<FetchServerMoviesResult> {
   const { feed = 'popular', page = 1, genreId, query, sortBy = 'popularity.desc' } = options;
-  const key = getTMDBApiKey();
 
   try {
-    let url = '';
+    let data: { results?: RawTMDBItem[]; total_pages?: number; total_results?: number } | null = null;
     if (query && query.trim()) {
-      url = `${TMDB_BASE_URL}/search/tv?api_key=${key}&query=${encodeURIComponent(
-        query.trim()
-      )}&page=${page}&include_adult=false`;
+      data = await tmdbFetchJson('search/tv', {
+        query: query.trim(),
+        page,
+        include_adult: false,
+      });
     } else if (genreId && genreId > 0) {
-      url = `${TMDB_BASE_URL}/discover/tv?api_key=${key}&with_genres=${genreId}&sort_by=${sortBy}&page=${page}&include_adult=false`;
+      data = await tmdbFetchJson('discover/tv', {
+        with_genres: genreId,
+        sort_by: sortBy,
+        page,
+        include_adult: false,
+      });
     } else {
-      switch (feed) {
-        case 'trending':
-          url = `${TMDB_BASE_URL}/trending/tv/week?api_key=${key}&page=${page}`;
-          break;
-        case 'top_rated':
-          url = `${TMDB_BASE_URL}/tv/top_rated?api_key=${key}&page=${page}`;
-          break;
-        case 'on_the_air':
-          url = `${TMDB_BASE_URL}/tv/on_the_air?api_key=${key}&page=${page}`;
-          break;
-        case 'popular':
-        default:
-          url = `${TMDB_BASE_URL}/tv/popular?api_key=${key}&page=${page}`;
-          break;
-      }
+      const pathMap: Record<SeriesFeedType, string> = {
+        trending: 'trending/tv/week',
+        top_rated: 'tv/top_rated',
+        on_the_air: 'tv/on_the_air',
+        popular: 'tv/popular',
+      };
+      data = await tmdbFetchJson(pathMap[feed] || 'tv/popular', { page });
     }
 
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      const rawResults: RawTMDBItem[] = data.results || [];
-      const items: MediaItem[] = rawResults
+    if (data && Array.isArray(data.results)) {
+      const items: MediaItem[] = data.results
         .filter((raw) => Boolean(raw.name && (raw.poster_path || raw.backdrop_path)))
         .map((raw) => normalizeTMDBItem(raw, 'series'));
 
@@ -468,24 +521,18 @@ export async function fetchServerSeries(options: {
       };
     }
   } catch (err) {
-    console.warn('Error fetching server series from TMDB:', err);
+    console.warn('Error fetching server series:', err);
   }
 
   return { items: [], totalPages: 1, totalResults: 0, page };
 }
 
 export async function fetchAllServerSeriesMultiFeed(page = 1): Promise<MediaItem[]> {
-  const key = getTMDBApiKey();
-  const endpoints = [
-    `${TMDB_BASE_URL}/tv/popular?api_key=${key}&page=${page}`,
-    `${TMDB_BASE_URL}/trending/tv/week?api_key=${key}&page=${page}`,
-    `${TMDB_BASE_URL}/tv/top_rated?api_key=${key}&page=${page}`,
-    `${TMDB_BASE_URL}/tv/on_the_air?api_key=${key}&page=${page}`,
-  ];
+  const paths = ['tv/popular', 'trending/tv/week', 'tv/top_rated', 'tv/on_the_air'];
 
   try {
     const responses = await Promise.allSettled(
-      endpoints.map((url) => fetch(url).then((r) => (r.ok ? r.json() : null)))
+      paths.map((p) => tmdbFetchJson<{ results?: RawTMDBItem[] }>(p, { page }))
     );
 
     const map = new Map<number, MediaItem>();
@@ -539,46 +586,34 @@ export async function fetchServerIndexedCatalog(
   return { items: [], page, totalPages: 1, totalResults: 0 };
 }
 
-// Safe live fetch: tries TMDB first (with default key), then falls back to free TVMaze
+// Safe live fetch: tries backend TMDB proxy first, then falls back to free TVMaze
 export async function fetchLiveTrending(
   type: 'all' | 'movie' | 'tv' = 'all',
   page = 1
 ): Promise<MediaItem[]> {
-  const key = getTMDBApiKey();
-
-  if (key) {
-    try {
-      if (type === 'all') {
-        const [movieRes, tvRes] = await Promise.allSettled([
-          fetch(`${TMDB_BASE_URL}/trending/movie/week?api_key=${key}&page=${page}`).then((r) =>
-            r.ok ? r.json() : null
-          ),
-          fetch(`${TMDB_BASE_URL}/trending/tv/week?api_key=${key}&page=${page}`).then((r) =>
-            r.ok ? r.json() : null
-          ),
-        ]);
-        const items: MediaItem[] = [];
-        if (movieRes.status === 'fulfilled' && movieRes.value?.results) {
-          items.push(
-            ...movieRes.value.results.map((r: RawTMDBItem) => normalizeTMDBItem(r, 'movie'))
-          );
-        }
-        if (tvRes.status === 'fulfilled' && tvRes.value?.results) {
-          items.push(...tvRes.value.results.map((r: RawTMDBItem) => normalizeTMDBItem(r, 'series')));
-        }
-        if (items.length > 0) return items;
-      } else {
-        const url = `${TMDB_BASE_URL}/trending/${type}/week?api_key=${key}&page=${page}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          return (data.results || []).map((item: RawTMDBItem) =>
-            normalizeTMDBItem(item, type === 'movie' ? 'movie' : 'series')
-          );
-        }
+  try {
+    if (type === 'all') {
+      const [movieData, tvData] = await Promise.all([
+        tmdbFetchJson<{ results?: RawTMDBItem[] }>('trending/movie/week', { page }),
+        tmdbFetchJson<{ results?: RawTMDBItem[] }>('trending/tv/week', { page }),
+      ]);
+      const items: MediaItem[] = [];
+      if (movieData?.results) {
+        items.push(...movieData.results.map((r) => normalizeTMDBItem(r, 'movie')));
       }
-    } catch {}
-  }
+      if (tvData?.results) {
+        items.push(...tvData.results.map((r) => normalizeTMDBItem(r, 'series')));
+      }
+      if (items.length > 0) return items;
+    } else {
+      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(`trending/${type}/week`, { page });
+      if (data?.results) {
+        return data.results.map((item) =>
+          normalizeTMDBItem(item, type === 'movie' ? 'movie' : 'series')
+        );
+      }
+    }
+  } catch {}
 
   // Graceful Zero-Key Live API Fallback via TVMaze
   try {
@@ -594,16 +629,34 @@ export async function fetchLiveTrending(
   return [];
 }
 
-// Live search: searches TMDB if key is valid; otherwise searches live TVMaze (100% free with no key required)
+// Live search: prefers reliable server-side /api/search proxy, then direct TMDB, then TVMaze
 export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> {
-  if (!query.trim()) return [];
+  const trimmed = query.trim();
+  if (!trimmed) return [];
   const key = getTMDBApiKey();
 
-  // Try TMDB if key is set
+  // 1. Try Express backend /api/search proxy (avoids browser CORS/DNS blocks)
+  try {
+    const params = new URLSearchParams({ q: trimmed, page: String(page) });
+    if (key && key !== DEFAULT_PUBLIC_TMDB_KEY) {
+      params.set('apiKey', key);
+    }
+    const proxyRes = await fetch(`/api/search?${params.toString()}`);
+    if (proxyRes.ok) {
+      const data = (await proxyRes.json()) as { results?: RawTMDBItem[] };
+      if (Array.isArray(data.results) && data.results.length > 0) {
+        return data.results
+          .filter((item) => item.media_type === 'movie' || item.media_type === 'tv')
+          .map((item) => normalizeTMDBItem(item));
+      }
+    }
+  } catch {}
+
+  // 2. Fallback to direct TMDB query
   if (key) {
     try {
       const url = `${TMDB_BASE_URL}/search/multi?api_key=${key}&query=${encodeURIComponent(
-        query.trim()
+        trimmed
       )}&page=${page}&include_adult=false`;
       const res = await fetch(url);
       if (res.ok) {
@@ -615,10 +668,10 @@ export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> 
     } catch {}
   }
 
-  // Instant Zero-Key Live Search via TVMaze
+  // 3. Instant Zero-Key Live Search Fallback via TVMaze
   try {
     const res = await fetch(
-      `${TVMAZE_BASE_URL}/search/shows?q=${encodeURIComponent(query.trim())}`
+      `${TVMAZE_BASE_URL}/search/shows?q=${encodeURIComponent(trimmed)}`
     );
     if (res.ok) {
       const data: { show: TVMazeShow }[] = await res.json();

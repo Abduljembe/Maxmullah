@@ -396,8 +396,60 @@ export interface LivePrimeSrcHost {
 }
 
 export interface LiveServerSourcesResponse {
+  directStreamUrl?: string;
+  vidlinkAvailable: boolean;
   vixsrcAvailable: boolean;
   primeSrcHosts: LivePrimeSrcHost[];
+  resolvedImdbId?: string;
+  recommendedServer?: AnyServerId;
+}
+
+export async function saveCustomDirectStream(
+  media: MediaItem,
+  url: string,
+  season = 1,
+  episode = 1
+): Promise<boolean> {
+  const id = resolveTargetIdentifier(media);
+  const type = media.type === 'series' ? 'tv' : 'movie';
+  try {
+    const res = await fetch('/api/streams', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id,
+        type,
+        season,
+        episode,
+        url: url.trim(),
+        title: media.title,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function removeCustomDirectStream(
+  media: MediaItem,
+  season = 1,
+  episode = 1
+): Promise<boolean> {
+  const id = resolveTargetIdentifier(media);
+  const type = media.type === 'series' ? 'tv' : 'movie';
+  try {
+    const params = new URLSearchParams({
+      id,
+      type,
+      season: String(Math.max(1, season)),
+      episode: String(Math.max(1, episode)),
+    });
+    const res = await fetch(`/api/streams?${params.toString()}`, { method: 'DELETE' });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function fetchLiveServerSources(
@@ -423,15 +475,19 @@ export async function fetchLiveServerSources(
     if (res.ok) {
       const data = (await res.json()) as Partial<LiveServerSourcesResponse>;
       return {
+        directStreamUrl: data.directStreamUrl,
+        vidlinkAvailable: Boolean(data.vidlinkAvailable),
         vixsrcAvailable: Boolean(data.vixsrcAvailable),
         primeSrcHosts: Array.isArray(data.primeSrcHosts) ? data.primeSrcHosts : [],
+        resolvedImdbId: data.resolvedImdbId,
+        recommendedServer: data.recommendedServer,
       };
     }
   } catch (err) {
     console.warn('fetchLiveServerSources error:', err);
   }
 
-  return { vixsrcAvailable: false, primeSrcHosts: [] };
+  return { vidlinkAvailable: false, vixsrcAvailable: false, primeSrcHosts: [] };
 }
 
 export interface MovieDownloadMirror {
