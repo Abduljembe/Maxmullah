@@ -1,8 +1,10 @@
 import React from 'react';
-import { Play, Download, Check, HardDrive } from 'lucide-react';
+import { Play, Download, Check, HardDrive, Info } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
 import { useProfile } from '../../context/ProfileContext';
+import { generateStreamSource } from '../../services/videoProviderService';
+import { prewarmStreamUrl } from '../../utils/adBlocker';
 
 interface MediaCardProps {
   media: MediaItem;
@@ -24,10 +26,16 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   const isDownloaded = isMediaDownloaded(media.id);
   const inWatchlist = isInWatchlist(media.id);
 
+  const handleMouseEnter = () => {
+    const stream = generateStreamSource(media);
+    prewarmStreamUrl(stream.url);
+  };
+
   return (
     <div
-      onClick={() => onSelect(media)}
-      className="group relative rounded-2xl overflow-hidden bg-[#0E121B] border border-white/8 hover:border-white/25 transition-all duration-300 hover:-translate-y-1.5 shadow-lg flex flex-col cursor-pointer select-none"
+      onClick={() => onPlay(media)}
+      onMouseEnter={handleMouseEnter}
+      className="group relative rounded-2xl overflow-hidden bg-[#0E121B] border border-white/8 hover:border-white/25 transition-all duration-200 hover:-translate-y-1.5 shadow-lg flex flex-col cursor-pointer select-none"
     >
       {/* Poster Image Container */}
       <div className="relative aspect-[2/3] w-full overflow-hidden bg-slate-900">
@@ -42,7 +50,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         {/* Ambient Bottom Gradient Scrim */}
         <div className="absolute inset-0 bg-gradient-to-t from-[#0E121B] via-transparent to-black/20 opacity-75 group-hover:opacity-55 transition-opacity" />
 
-        {/* Minimal Downloaded Indicator Only (No Poster Badge Clutter) */}
+        {/* Minimal Downloaded Indicator Only */}
         {isDownloaded && (
           <div className="absolute top-2.5 right-2.5 text-[10px] font-semibold text-emerald-300 bg-black/75 backdrop-blur-md px-2 py-0.5 rounded flex items-center gap-1 pointer-events-none">
             <HardDrive className="w-2.5 h-2.5" />
@@ -50,20 +58,33 @@ export const MediaCard: React.FC<MediaCardProps> = ({
           </div>
         )}
 
-        {/* Hover Action Overlay */}
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-3 p-4">
+        {/* 1-Click Play Hover Overlay */}
+        <div className="absolute inset-0 bg-black/55 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex flex-col items-center justify-center gap-3 p-4">
           <button
             onClick={(e) => {
               e.stopPropagation();
               onPlay(media);
             }}
-            className="w-12 h-12 rounded-full bg-white text-slate-950 hover:bg-slate-200 flex items-center justify-center shadow-xl transform group-hover:scale-105 transition-all cursor-pointer"
+            className="w-13 h-13 rounded-full bg-white text-slate-950 hover:bg-slate-200 flex items-center justify-center shadow-2xl transform group-hover:scale-105 transition-all cursor-pointer"
             title={media.type === 'series' ? 'Play Series' : 'Play Movie'}
+            aria-label={`Play ${media.title}`}
           >
-            <Play className="w-5 h-5 fill-current ml-0.5" />
+            <Play className="w-6 h-6 fill-current ml-0.5" />
           </button>
 
           <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(media);
+              }}
+              className="p-2 rounded-full bg-white/15 hover:bg-white/25 text-white text-xs transition-colors cursor-pointer"
+              title="Details & Episodes"
+              aria-label={`More info about ${media.title}`}
+            >
+              <Info className="w-4 h-4" />
+            </button>
+
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -71,6 +92,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               }}
               className="p-2 rounded-full bg-white/15 hover:bg-white/25 text-white text-xs transition-colors cursor-pointer"
               title="Download"
+              aria-label={`Download ${media.title}`}
             >
               <Download className="w-4 h-4" />
             </button>
@@ -84,6 +106,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
                 inWatchlist ? 'bg-rose-600 text-white' : 'bg-white/15 hover:bg-white/25 text-white'
               }`}
               title={inWatchlist ? 'In My List' : 'Add to My List'}
+              aria-label={inWatchlist ? `Remove ${media.title} from list` : `Add ${media.title} to list`}
             >
               <Check className={`w-4 h-4 ${inWatchlist ? 'stroke-[3]' : 'opacity-70'}`} />
             </button>

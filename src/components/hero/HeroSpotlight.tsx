@@ -127,6 +127,13 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
           <div className="flex flex-wrap items-center gap-3 pt-2">
             <button
               onClick={() => onPlay(currentItem)}
+              onMouseEnter={() => {
+                import('../../services/videoProviderService').then(({ generateStreamSource }) => {
+                  import('../../utils/adBlocker').then(({ prewarmStreamUrl }) => {
+                    prewarmStreamUrl(generateStreamSource(currentItem).url);
+                  });
+                });
+              }}
               className="flex items-center gap-2 px-7 py-3.5 rounded-xl bg-white text-slate-950 hover:bg-slate-200 font-extrabold text-sm transition-all shadow-xl cursor-pointer whitespace-nowrap"
             >
               <Play className="w-4 h-4 fill-current" />

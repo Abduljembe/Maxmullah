@@ -180,7 +180,7 @@ export const VibeMatcherModal: React.FC<VibeMatcherModalProps> = ({
               >
                 <div
                   onClick={() => {
-                    onSelectMedia(item);
+                    onPlay(item);
                     onClose();
                   }}
                   className="flex items-center gap-3.5 min-w-0 cursor-pointer"

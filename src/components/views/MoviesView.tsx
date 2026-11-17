@@ -20,6 +20,7 @@ import { MediaCard } from '../cards/MediaCard';
 import {
   fetchServerMovies,
   fetchAllServerMoviesMultiFeed,
+  fetchServerIndexedCatalog,
   MOVIE_GENRES_LIST,
   MovieFeedType,
 } from '../../services/tmdbService';
@@ -72,12 +73,27 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
 
       try {
         if (activeFeed === 'all_feeds' && !debouncedQuery && selectedGenreId === 0) {
-          // Multi-feed massive load: popular + trending + top_rated + now_playing
-          const batch = await fetchAllServerMoviesMultiFeed(pageToLoad);
+          // Load directly from VixSrc/PrimeSrc server index + multi-feed TMDB releases
+          const [indexedRes, multiRes] = await Promise.allSettled([
+            fetchServerIndexedCatalog('movie', pageToLoad),
+            fetchAllServerMoviesMultiFeed(pageToLoad),
+          ]);
+          const combined: MediaItem[] = [];
+          if (indexedRes.status === 'fulfilled' && indexedRes.value.items.length > 0) {
+            combined.push(...indexedRes.value.items);
+          }
+          if (multiRes.status === 'fulfilled' && multiRes.value.length > 0) {
+            combined.push(...multiRes.value);
+          }
+          const batch = deduplicateMedia(combined);
           if (batch.length > 0) {
             setServerMovies((prev) => (append ? deduplicateMedia([...prev, ...batch]) : batch));
-            setTotalResults(batch.length * 4);
-            setTotalPages(10);
+            setTotalResults(
+              indexedRes.status === 'fulfilled' && indexedRes.value.totalResults > 0
+                ? indexedRes.value.totalResults
+                : batch.length * 10
+            );
+            setTotalPages(100);
             setIsServerLive(true);
           } else if (!append) {
             setServerMovies(initialCatalogMovies.filter((m) => m.type === 'movie'));

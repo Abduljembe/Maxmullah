@@ -1,9 +1,5 @@
 import { MediaItem, Season, Episode } from '../types';
 
-const SAMPLE_VIDEOS = [
-  '/media/offline_media_sample.mp4',
-];
-
 /**
  * Extracts total season count from media item, duration string, or seasons array.
  */
@@ -21,7 +17,7 @@ export function getSeasonCount(media: MediaItem): number {
 /**
  * Ensures that any series has a complete, structured seasons and episodes hierarchy.
  * If media.seasons is populated, it preserves it; otherwise it synthesizes realistic,
- * episode-accurate lists so the user can select and stream ANY season and episode on Viduki.
+ * episode-accurate lists so the user can select and stream ANY season and episode.
  */
 export function ensureMediaSeasons(media: MediaItem): Season[] {
   if (media.type !== 'series') return [];
@@ -44,7 +40,6 @@ export function ensureMediaSeasons(media: MediaItem): Season[] {
   for (let s = 1; s <= seasonCount; s++) {
     const episodes: Episode[] = [];
     for (let e = 1; e <= episodesPerSeason; e++) {
-      const vidUrl = SAMPLE_VIDEOS[(s + e) % SAMPLE_VIDEOS.length];
       const durationMin = 48 + ((s * 3 + e * 5) % 18); // ~48 to 65 mins
 
       episodes.push({
@@ -54,7 +49,7 @@ export function ensureMediaSeasons(media: MediaItem): Season[] {
         durationMinutes: durationMin,
         synopsis: getEpisodeSynopsis(media.title, s, e),
         downloadSizeMb: Math.round(durationMin * 16.5), // ~800-1100 MB
-        videoUrl: vidUrl,
+        videoUrl: '',
       });
     }
 

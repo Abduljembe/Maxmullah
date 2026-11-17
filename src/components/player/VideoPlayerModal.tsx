@@ -16,12 +16,14 @@ import {
   Check,
   ChevronDown,
   RefreshCw,
+  ArrowDownToLine,
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
 import { useProfile } from '../../context/ProfileContext';
 import { ensureMediaSeasons } from '../../utils/seriesUtils';
+import { downloadVideoFile, isDirectStreamUrl } from '../../utils/fileDownloader';
 import {
   generateStreamSource,
   VIDUKI_SERVERS,
@@ -29,7 +31,10 @@ import {
   getVideoProviderConfig,
   saveVideoProviderConfig,
   getNextFastestServer,
+  fetchLiveServerSources,
+  LiveServerSourcesResponse,
 } from '../../services/videoProviderService';
+import { prewarmStreamUrl } from '../../utils/adBlocker';
 
 interface VideoPlayerModalProps {
   media: MediaItem;
@@ -68,21 +73,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   const isDownloaded = isMediaDownloaded(media.id, currentSeason, currentEpisode);
   const downloadedItem = getDownloadedMedia(media.id, currentSeason, currentEpisode);
+  const hasPlayableDownloadedFile = isDirectStreamUrl(downloadedItem?.videoUrl);
 
-  // Automatically play offline cached copy when offline, otherwise stream
+  // Automatically play local file when offline only if a real local/stream URL exists; otherwise use stream
   const [playerMode, setPlayerMode] = useState<'stream' | 'native' | 'offline' | 'trailer'>(() =>
-    isOffline && isMediaDownloaded(media.id, seasonNumber || 1, episodeNumber || 1)
-      ? 'offline'
-      : 'stream'
+    isOffline && hasPlayableDownloadedFile ? 'offline' : 'stream'
   );
 
-  // Inbuilt background server routing & silent failover
+  // Inbuilt background server routing & silent failover (defaults to fastest ad-free VidLink player)
   const [selectedServer, setSelectedServer] = useState<AnyServerId>(() => {
     return getVideoProviderConfig().vidukiServer || 'vidlink';
   });
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
+  const [iframeLoaded, setIframeLoaded] = useState(false);
   const [customStreamUrl, setCustomStreamUrl] = useState('');
+  const [liveSources, setLiveSources] = useState<LiveServerSourcesResponse | null>(null);
 
   // Native HTML5 / HLS player controls state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -99,22 +105,32 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   const controlsTimeoutRef = useRef<number | null>(null);
 
-  // Silent background failover if an embed server stalls on initial handshake
+  // Probe live PrimeSrc & VixSrc host availability for the active title/episode
   useEffect(() => {
-    if (playerMode !== 'stream') return;
-    let seconds = 0;
-    const interval = setInterval(() => {
-      seconds += 1;
-      if (seconds === 12) {
-        const nextServer = getNextFastestServer(selectedServer);
-        setSelectedServer(nextServer);
-        setIframeKey((k) => k + 1);
-        const cfg = getVideoProviderConfig();
-        saveVideoProviderConfig({ ...cfg, vidukiServer: nextServer });
+    let cancelled = false;
+    fetchLiveServerSources(media, currentSeason, currentEpisode).then((res) => {
+      if (!cancelled) {
+        setLiveSources(res);
       }
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [playerMode, selectedServer, currentSeason, currentEpisode, iframeKey]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [media, currentSeason, currentEpisode]);
+
+  // Silent background failover if an embed frame stalls without loading for 6.5s
+  useEffect(() => {
+    if (playerMode !== 'stream' || iframeLoaded) return;
+    const timeout = window.setTimeout(() => {
+      const nextServer = getNextFastestServer(selectedServer);
+      setSelectedServer(nextServer);
+      setIframeLoaded(false);
+      setIframeKey((k) => k + 1);
+      const cfg = getVideoProviderConfig();
+      saveVideoProviderConfig({ ...cfg, vidukiServer: nextServer });
+    }, 6500);
+    return () => window.clearTimeout(timeout);
+  }, [playerMode, iframeLoaded, selectedServer, currentSeason, currentEpisode, iframeKey]);
 
   // Resolved structured seasons & active episode
   const allSeasons = ensureMediaSeasons(media);
@@ -123,13 +139,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     (e) => e.episodeNumber === currentEpisode
   );
 
-  // Generate stream source invisibly under the hood
+  // Generate stream source cleanly under the hood
   const activeStreamSource = generateStreamSource(
     media,
     currentSeason,
     currentEpisode,
     selectedServer
   );
+
+  useEffect(() => {
+    if (activeStreamSource?.url) {
+      prewarmStreamUrl(activeStreamSource.url);
+    }
+  }, [activeStreamSource?.url]);
 
   const trailerId = media.trailerYoutubeId || 'Way9Dexny3w';
 
@@ -167,6 +189,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setDrawerSeason(targetSeason);
     onSelectEpisode?.(targetSeason, targetEp);
     setPlayerMode('stream');
+    setIframeLoaded(false);
     setIframeKey((prev) => prev + 1);
   };
 
@@ -179,6 +202,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setSelectedServer(serverId);
     setShowSourceMenu(false);
     setPlayerMode('stream');
+    setIframeLoaded(false);
     setIframeKey((prev) => prev + 1);
     const cfg = getVideoProviderConfig();
     saveVideoProviderConfig({ ...cfg, vidukiServer: serverId });
@@ -264,7 +288,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }, 3200);
   };
 
-  // Inbuilt Native HLS.js video engine lifecycle
+  // Inbuilt Native HLS.js video engine lifecycle with instant 1-click autoplay
   useEffect(() => {
     if (playerMode !== 'native' && playerMode !== 'offline') return;
     const video = videoRef.current;
@@ -272,8 +296,37 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     const source =
       playerMode === 'offline'
-        ? downloadedItem?.videoUrl || '/media/offline_media_sample.mp4'
-        : customStreamUrl || media.videoPreviewUrl || '/media/offline_media_sample.mp4';
+        ? downloadedItem?.videoUrl || ''
+        : customStreamUrl.trim() || media.videoPreviewUrl || '';
+
+    if (!isDirectStreamUrl(source)) {
+      setPlayerMode('stream');
+      return;
+    }
+
+    const attemptAutoPlay = () => {
+      video
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+          setIsLoading(false);
+        })
+        .catch(() => {
+          // If browser blocks unmuted autoplay, retry muted smoothly
+          video.muted = true;
+          setIsMuted(true);
+          video
+            .play()
+            .then(() => {
+              setIsPlaying(true);
+              setIsLoading(false);
+            })
+            .catch(() => {
+              setIsPlaying(false);
+              setIsLoading(false);
+            });
+        });
+    };
 
     if (source.includes('.m3u8') && Hls.isSupported()) {
       if (hlsRef.current) {
@@ -286,6 +339,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       });
       hls.loadSource(source);
       hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, attemptAutoPlay);
       hlsRef.current = hls;
 
       return () => {
@@ -298,6 +352,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         hlsRef.current = null;
       }
       video.src = source;
+      attemptAutoPlay();
     }
   }, [playerMode, customStreamUrl, downloadedItem, media]);
 
@@ -357,13 +412,45 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       {/* 1. STREAMING PLAYER */}
       {playerMode === 'stream' && (
         <div className="w-full h-full relative flex flex-col bg-black">
+          {/* Smooth Backdrop Loading Curtain (Fades out automatically when player loads) */}
+          <div
+            className={`absolute inset-0 z-10 flex flex-col items-center justify-center bg-black transition-opacity duration-300 ${
+              iframeLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'
+            }`}
+          >
+            {media.backdropUrl && (
+              <img
+                src={media.backdropUrl}
+                alt=""
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full object-cover opacity-30 blur-md scale-105"
+              />
+            )}
+            <div className="relative z-10 flex flex-col items-center gap-3 text-center px-6">
+              <Loader2 className="w-11 h-11 text-rose-500 animate-spin" />
+              <p className="text-sm font-semibold text-white tracking-tight">
+                Starting {media.title} on {activeStreamSource.providerName}...
+              </p>
+              <button
+                onClick={() => handleSelectServer(getNextFastestServer(selectedServer))}
+                className="mt-1 px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
+              >
+                Switch Server
+              </button>
+            </div>
+          </div>
+
           <iframe
             key={`player-frame-${selectedServer}-${currentSeason}-${currentEpisode}-${iframeKey}`}
             src={activeStreamSource.url}
             title={displayTitle}
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+            onLoad={() => setIframeLoaded(true)}
+            referrerPolicy="origin"
+            allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *; accelerometer; gyroscope; clipboard-write; web-share"
             allowFullScreen
-            className="w-full h-full border-0"
+            className={`w-full h-full border-0 transition-opacity duration-300 ${
+              iframeLoaded ? 'opacity-100' : 'opacity-0'
+            }`}
           />
         </div>
       )}
@@ -594,16 +681,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               title="Change video source"
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Source</span>
+              <span className="hidden sm:inline">{activeStreamSource.providerName}</span>
             </button>
 
             {showSourceMenu && (
-              <div className="absolute top-full right-0 mt-2 w-72 rounded-2xl bg-[#0D111A]/95 border border-white/15 p-3 shadow-2xl backdrop-blur-2xl z-50 text-slate-200 space-y-2">
+              <div className="absolute top-full right-0 mt-2 w-80 rounded-2xl bg-[#0D111A]/95 border border-white/15 p-3 shadow-2xl backdrop-blur-2xl z-50 text-slate-200 space-y-2">
                 <div className="flex items-center justify-between px-1 pb-1.5 border-b border-white/10">
-                  <span className="text-xs font-bold text-white">Video Source</span>
+                  <span className="text-xs font-bold text-white">Streaming Servers</span>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => {
+                        setIframeLoaded(false);
                         setIframeKey((k) => k + 1);
                         setShowSourceMenu(false);
                       }}
@@ -621,22 +709,43 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   </div>
                 </div>
 
-                <div className="max-h-60 overflow-y-auto space-y-1 no-scrollbar">
+                <div className="max-h-72 overflow-y-auto space-y-1 no-scrollbar">
                   {VIDUKI_SERVERS.map((server) => {
                     const isSelected = selectedServer === server.id && playerMode === 'stream';
+                    const primeHosts = liveSources?.primeSrcHosts || [];
+                    const distinctPrimeNames = Array.from(
+                      new Set(primeHosts.map((h) => h.name).filter(Boolean))
+                    );
+                    const subLabel =
+                      server.id === 'primesrc' && distinctPrimeNames.length > 0
+                        ? `${distinctPrimeNames.slice(0, 6).join(' · ')}${
+                            distinctPrimeNames.length > 6 ? ` +${distinctPrimeNames.length - 6}` : ''
+                          }`
+                        : server.description;
+
                     return (
                       <button
                         key={server.id}
                         onClick={() => handleSelectServer(server.id)}
-                        className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-colors flex items-center justify-between cursor-pointer ${
+                        className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer ${
                           isSelected
                             ? 'bg-rose-600/25 text-white font-semibold'
                             : 'hover:bg-white/10 text-slate-300'
                         }`}
                       >
-                        <div>
-                          <div>{server.name}</div>
-                          <div className="text-[10px] text-slate-400">{server.description}</div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate">{server.name}</span>
+                            {server.id === 'vixsrc' && liveSources?.vixsrcAvailable && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                            )}
+                            {server.id === 'primesrc' && primeHosts.length > 0 && (
+                              <span className="text-[10px] font-mono text-emerald-400 shrink-0">
+                                ({primeHosts.length})
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate">{subLabel}</div>
                         </div>
                         {isSelected && <Check className="w-4 h-4 text-rose-400 shrink-0" />}
                       </button>
@@ -659,7 +768,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     />
                     <button
                       onClick={() => {
-                        if (customStreamUrl.trim()) {
+                        if (isDirectStreamUrl(customStreamUrl)) {
                           setPlayerMode('native');
                           setShowSourceMenu(false);
                         }
@@ -668,6 +777,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     >
                       Play
                     </button>
+                    {isDirectStreamUrl(customStreamUrl) && (
+                      <button
+                        onClick={async () => {
+                          const fname = `${media.title}.mp4`.replace(/[^a-zA-Z0-9.-]/g, '_');
+                          await downloadVideoFile(customStreamUrl, fname);
+                        }}
+                        className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+                        title="Download this stream as .mp4"
+                      >
+                        <ArrowDownToLine className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -685,7 +806,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             Trailer
           </button>
 
-          {isDownloaded && (
+          {isDownloaded && hasPlayableDownloadedFile && (
             <button
               onClick={() => setPlayerMode(playerMode === 'offline' ? 'stream' : 'offline')}
               className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer border flex items-center gap-1.5 ${
@@ -754,6 +875,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       onSelectEpisode?.(drawerSeason, ep.episodeNumber);
                       setShowEpisodeDrawer(false);
                       setPlayerMode('stream');
+                      setIframeLoaded(false);
                       setIframeKey((prev) => prev + 1);
                     }}
                     className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${

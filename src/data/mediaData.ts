@@ -94,13 +94,13 @@ export const PLATFORM_INFO: Record<
 };
 
 const SAMPLE_VIDEOS = {
-  scifi: '/media/offline_media_sample.mp4',
-  nature: '/media/offline_media_sample.mp4',
-  animation: '/media/offline_media_sample.mp4',
-  action: '/media/offline_media_sample.mp4',
-  adventure: '/media/offline_media_sample.mp4',
-  drama: '/media/offline_media_sample.mp4',
-  comedy: '/media/offline_media_sample.mp4',
+  scifi: '',
+  nature: '',
+  animation: '',
+  action: '',
+  adventure: '',
+  drama: '',
+  comedy: '',
 };
 
 export const MEDIA_CATALOG: MediaItem[] = [

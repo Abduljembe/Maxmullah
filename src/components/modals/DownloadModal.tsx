@@ -5,20 +5,22 @@ import {
   HardDrive,
   Check,
   Tv,
-  Film,
   Layers,
-  Sparkles,
   ArrowDownToLine,
-  CheckCircle2,
   ListVideo,
   Loader2,
   Server,
+  Link2,
+  AlertCircle,
+  ExternalLink,
 } from 'lucide-react';
 import { DownloadQuality, MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
 import { ensureMediaSeasons } from '../../utils/seriesUtils';
-import { downloadVideoFile } from '../../utils/fileDownloader';
+import { downloadVideoFile, isDirectStreamUrl } from '../../utils/fileDownloader';
 import { fetchServerQualities, ServerQualityRendition } from '../../services/mediaQualityService';
+import { getMovieDownloadMirrors } from '../../services/videoProviderService';
+import { safeOpenTab } from '../../utils/adBlocker';
 
 interface DownloadModalProps {
   media: MediaItem;
@@ -60,17 +62,31 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
   );
   const [selectedSubtitle, setSelectedSubtitle] = useState('English [CC]');
 
-  // Also trigger direct browser file download onto user device (Downloads folder)
+  // Optional direct .mp4/.m3u8 URL & device download toggle
+  const [directStreamUrl, setDirectStreamUrl] = useState<string>(() =>
+    isDirectStreamUrl(media.videoPreviewUrl) ? media.videoPreviewUrl : ''
+  );
   const [saveDirectToDevice, setSaveDirectToDevice] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Active season and episode objects
   const activeSeason = isSeries
     ? seasons.find((s) => s.seasonNumber === selectedSeasonNum) || seasons[0]
     : undefined;
-  const activeEpisode = activeSeason?.episodes.find(
-    (e) => e.episodeNumber === selectedEpisodeNum
-  ) || activeSeason?.episodes[0];
+  const activeEpisode =
+    activeSeason?.episodes.find((e) => e.episodeNumber === selectedEpisodeNum) ||
+    activeSeason?.episodes[0];
+
+  // Update prefilled direct stream URL if episode has a real stream URL
+  useEffect(() => {
+    const epUrl = activeEpisode?.videoUrl;
+    if (isSeries && isDirectStreamUrl(epUrl)) {
+      setDirectStreamUrl(epUrl!);
+    } else if (!isSeries && isDirectStreamUrl(media.videoPreviewUrl)) {
+      setDirectStreamUrl(media.videoPreviewUrl);
+    }
+  }, [isSeries, activeEpisode, media.videoPreviewUrl]);
 
   // Dynamic server quality detection on title or season/episode change
   useEffect(() => {
@@ -79,7 +95,6 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
     fetchServerQualities(media, selectedSeasonNum, selectedEpisodeNum).then((qualities) => {
       if (cancelled) return;
       setServerQualities(qualities);
-      // Select best default: 1080p if available, else highest available
       const defaultQuality =
         qualities.find((q) => q.id === '1080p') ||
         qualities.find((q) => q.id === '720p') ||
@@ -94,15 +109,22 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
     };
   }, [media, selectedSeasonNum, selectedEpisodeNum]);
 
-  // Selected rendition
   const activeRendition =
     serverQualities.find((q) => q.id === selectedQualityId) || serverQualities[0];
 
-  // Total size calculation (scaled by season episode count if batch mode)
-  const episodesMultiplier = downloadScope === 'all' && activeSeason ? activeSeason.episodes.length : 1;
+  const episodesMultiplier =
+    downloadScope === 'all' && activeSeason ? activeSeason.episodes.length : 1;
   const totalDownloadMb = (activeRendition?.sizeMb || 1200) * episodesMultiplier;
 
+  const downloadMirrors = getMovieDownloadMirrors(media, selectedSeasonNum, selectedEpisodeNum);
+
+  const resolvedDirectUrl =
+    directStreamUrl.trim() ||
+    (isSeries ? activeEpisode?.videoUrl || '' : media.videoPreviewUrl || '');
+  const hasRealDirectUrl = isDirectStreamUrl(resolvedDirectUrl);
+
   const handleConfirmDownload = async () => {
+    setDownloadError(null);
     setIsExporting(true);
 
     const effectiveQuality: DownloadQuality =
@@ -112,9 +134,27 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
         ? '720p'
         : '1080p';
 
+    const targetFilename = isSeries
+      ? sanitizeFilename(
+          `${media.title}.S${String(selectedSeasonNum).padStart(2, '0')}E${String(
+            selectedEpisodeNum
+          ).padStart(2, '0')}.${selectedQualityId}.mp4`
+        )
+      : sanitizeFilename(`${media.title}.${media.year}.${selectedQualityId}.mp4`);
+
+    // 1. If saving direct file to device AND a valid direct stream URL is present, validate and download THAT exact stream
+    if (saveDirectToDevice && hasRealDirectUrl) {
+      const result = await downloadVideoFile(resolvedDirectUrl, targetFilename);
+      if (!result.ok) {
+        setIsExporting(false);
+        setDownloadError(result.error || 'Unable to download from the provided stream URL.');
+        return;
+      }
+    }
+
+    // 2. Save exact title/episode metadata (with real tmdbId/imdbId & any direct URL) to My Downloads
     if (isSeries) {
       if (downloadScope === 'all' && activeSeason) {
-        // Batch download all episodes of this season
         startBatchDownload(
           media,
           activeSeason.episodes,
@@ -123,47 +163,33 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
           selectedAudio,
           selectedSubtitle
         );
-
-        if (saveDirectToDevice && activeEpisode) {
-          const fname = sanitizeFilename(
-            `${media.title}.S0${selectedSeasonNum}E0${activeEpisode.episodeNumber}.${selectedQualityId}.mp4`
-          );
-          await downloadVideoFile(activeEpisode.videoUrl || media.videoPreviewUrl, fname);
-        }
       } else {
-        // Download single selected episode
         startDownload(
           media,
           effectiveQuality,
           selectedSeasonNum,
           selectedEpisodeNum,
           selectedAudio,
-          selectedSubtitle
+          selectedSubtitle,
+          hasRealDirectUrl ? resolvedDirectUrl : undefined
         );
-
-        if (saveDirectToDevice) {
-          const epNumFormatted = String(selectedEpisodeNum).padStart(2, '0');
-          const fname = sanitizeFilename(
-            `${media.title}.S0${selectedSeasonNum}E${epNumFormatted}.${selectedQualityId}.mp4`
-          );
-          await downloadVideoFile(activeEpisode?.videoUrl || media.videoPreviewUrl, fname);
-        }
       }
     } else {
-      // Movie download
       startDownload(
         media,
         effectiveQuality,
         undefined,
         undefined,
         selectedAudio,
-        selectedSubtitle
+        selectedSubtitle,
+        hasRealDirectUrl ? resolvedDirectUrl : undefined
       );
+    }
 
-      if (saveDirectToDevice) {
-        const fname = sanitizeFilename(`${media.title}.${media.year}.${selectedQualityId}.mp4`);
-        await downloadVideoFile(media.videoPreviewUrl, fname);
-      }
+    // 3. If user wants to save the MP4 file and no raw .mp4/.m3u8 URL was pasted,
+    // open this exact movie/episode's dedicated download server (NEVER a dummy sample clip).
+    if (saveDirectToDevice && !hasRealDirectUrl && downloadMirrors[0]) {
+      safeOpenTab(downloadMirrors[0].url);
     }
 
     setIsExporting(false);
@@ -185,7 +211,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-xs text-rose-500 font-bold uppercase tracking-wider mb-1 font-mono">
               <Download className="w-4 h-4" />
-              <span>Offline Download Vault</span>
+              <span>Download {media.type === 'series' ? 'Series' : 'Movie'}</span>
             </div>
             <h3 className="text-lg sm:text-xl font-bold text-white font-display leading-snug truncate">
               {titleHeader}
@@ -206,6 +232,13 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
 
         {/* Scrollable Configuration Body */}
         <div className="overflow-y-auto space-y-5 my-4 pr-1">
+          {downloadError && (
+            <div className="p-3.5 rounded-2xl bg-rose-500/15 border border-rose-500/40 flex items-start gap-2.5 text-xs text-rose-200">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <span>{downloadError}</span>
+            </div>
+          )}
+
           {/* SERIES SELECTOR: Season & Episode picker if TV Series */}
           {isSeries && seasons.length > 0 && (
             <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3.5">
@@ -267,7 +300,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
                 </button>
               </div>
 
-              {/* Episode Dropdown / Grid if Single Episode mode */}
+              {/* Episode List if Single Episode mode */}
               {downloadScope === 'single' && activeSeason && (
                 <div className="pt-1 space-y-1.5">
                   <label className="text-[11px] font-semibold text-slate-400 block">
@@ -310,17 +343,17 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             </div>
           )}
 
-          {/* Dynamic Video Quality Selection (Detected from Server) */}
+          {/* Video Quality Selection */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5 font-mono">
                 <Server className="w-3.5 h-3.5 text-rose-500" />
-                <span>Detected Server Qualities ({serverQualities.length})</span>
+                <span>Available Qualities ({serverQualities.length})</span>
               </label>
               {isLoadingQualities && (
                 <span className="flex items-center gap-1.5 text-[11px] text-amber-400 font-mono">
                   <Loader2 className="w-3 h-3 animate-spin" />
-                  <span>Probing stream manifests...</span>
+                  <span>Loading options...</span>
                 </span>
               )}
             </div>
@@ -329,10 +362,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
               <div className="p-6 rounded-2xl bg-white/5 border border-white/10 flex flex-col items-center justify-center text-center space-y-2">
                 <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
                 <p className="text-xs text-slate-300 font-medium">
-                  Waiting for streaming server to report available resolutions...
-                </p>
-                <p className="text-[11px] text-slate-400">
-                  Parsing stream bitrates and resolution tiers
+                  Checking available download resolutions for {media.title}...
                 </p>
               </div>
             ) : (
@@ -412,28 +442,66 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             </div>
           </div>
 
-          {/* Real Device File Download Option */}
-          <div className="p-3.5 rounded-2xl bg-gradient-to-r from-rose-600/15 to-transparent border border-rose-500/30 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-rose-600/30 text-rose-300 flex items-center justify-center shrink-0">
-                <ArrowDownToLine className="w-4 h-4" />
+          {/* Real Device File Download Option + Direct Stream Input */}
+          <div className="p-3.5 rounded-2xl bg-gradient-to-r from-rose-600/15 to-transparent border border-rose-500/30 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-rose-600/30 text-rose-300 flex items-center justify-center shrink-0">
+                  <ArrowDownToLine className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold text-white block">
+                    Save Movie File to Device (.mp4)
+                  </span>
+                  <p className="text-[11px] text-slate-300">
+                    {hasRealDirectUrl
+                      ? `Downloads "${media.title}" directly to your device Downloads folder.`
+                      : `Opens "${media.title}" download server or downloads your direct stream URL below.`}
+                  </p>
+                </div>
               </div>
-              <div>
-                <span className="text-xs font-bold text-white block">
-                  Also Save File to Your Device
-                </span>
-                <p className="text-[11px] text-slate-300">
-                  Directly saves the .mp4 file to your computer or phone's Download folder.
-                </p>
-              </div>
+              <input
+                type="checkbox"
+                id="saveDirect"
+                checked={saveDirectToDevice}
+                onChange={(e) => setSaveDirectToDevice(e.target.checked)}
+                className="w-5 h-5 rounded accent-rose-600 cursor-pointer"
+              />
             </div>
-            <input
-              type="checkbox"
-              id="saveDirect"
-              checked={saveDirectToDevice}
-              onChange={(e) => setSaveDirectToDevice(e.target.checked)}
-              className="w-5 h-5 rounded accent-rose-600 cursor-pointer"
-            />
+
+            {saveDirectToDevice && (
+              <div className="pt-2 border-t border-white/10 space-y-2">
+                <label className="text-[11px] text-slate-300 flex items-center gap-1.5 font-medium">
+                  <Link2 className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Direct Stream Link (.mp4 / .m3u8) — Optional</span>
+                </label>
+                <input
+                  type="url"
+                  value={directStreamUrl}
+                  onChange={(e) => {
+                    setDirectStreamUrl(e.target.value);
+                    setDownloadError(null);
+                  }}
+                  placeholder="https://... (.mp4 or .m3u8)"
+                  className="w-full bg-black/50 border border-white/15 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                />
+                {!hasRealDirectUrl && downloadMirrors.length > 1 && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {downloadMirrors.map((mirror) => (
+                      <button
+                        key={mirror.id}
+                        type="button"
+                        onClick={() => safeOpenTab(mirror.url)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-[11px] text-slate-200 font-medium transition-colors cursor-pointer"
+                      >
+                        <ExternalLink className="w-3 h-3 text-rose-400" />
+                        <span>{mirror.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Device Storage Status Bar */}
@@ -462,7 +530,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
               />
             </div>
             <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1.5">
-              <span>MullahMax Vault: {(storageStats.usedByMullahMaxMb / 1024).toFixed(1)} GB</span>
+              <span>MullahMax Library: {(storageStats.usedByMullahMaxMb / 1024).toFixed(1)} GB</span>
               <span className="text-rose-400 font-semibold font-mono">
                 +{(totalDownloadMb / 1024).toFixed(1)} GB
               </span>
@@ -486,7 +554,7 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({
             <Download className="w-4 h-4" />
             <span>
               {isExporting
-                ? 'Starting Download...'
+                ? 'Preparing Download...'
                 : `Download Now (${(totalDownloadMb / 1024).toFixed(1)} GB)`}
             </span>
           </button>

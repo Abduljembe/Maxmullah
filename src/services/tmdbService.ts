@@ -71,10 +71,6 @@ function mapProviderNameToPlatform(providerName: string): StreamingPlatform | nu
   return null;
 }
 
-const SAMPLE_FALLBACK_VIDEOS = [
-  '/media/offline_media_sample.mp4',
-];
-
 interface RawTMDBItem {
   id: number;
   title?: string;
@@ -182,9 +178,6 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
   const imdbScore = Math.max(6.0, Math.min(9.5, Number((raw.vote_average || 7.5).toFixed(1))));
   const rottenTomatoesScore = Math.min(99, Math.max(60, Math.round(imdbScore * 10.5)));
 
-  const videoFallback =
-    SAMPLE_FALLBACK_VIDEOS[Math.abs(raw.id) % SAMPLE_FALLBACK_VIDEOS.length];
-
   return {
     id: `tmdb-${type}-${raw.id}`,
     tmdbId: raw.id,
@@ -206,7 +199,7 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
     director,
     posterUrl,
     backdropUrl,
-    videoPreviewUrl: videoFallback,
+    videoPreviewUrl: '',
     audioTracks: ['English (Dolby Atmos)', 'Spanish (5.1)', 'French (5.1)', 'German', 'Japanese'],
     subtitles: ['English [CC]', 'Spanish', 'French', 'German', 'Japanese'],
     features: ['4K Ultra HD', 'Dolby Vision', 'Dolby Atmos', 'HDR10+'],
@@ -261,9 +254,6 @@ function normalizeTVMazeShow(show: TVMazeShow): MediaItem {
     show.image?.medium ||
     'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80';
 
-  const videoFallback =
-    SAMPLE_FALLBACK_VIDEOS[Math.abs(show.id) % SAMPLE_FALLBACK_VIDEOS.length];
-
   return {
     id: `tvm-${show.id}`,
     imdbId: show.externals?.imdb || undefined,
@@ -283,7 +273,7 @@ function normalizeTVMazeShow(show: TVMazeShow): MediaItem {
     cast: ['Leading Cast', 'Series Ensemble'],
     posterUrl,
     backdropUrl: posterUrl,
-    videoPreviewUrl: videoFallback,
+    videoPreviewUrl: '',
     audioTracks: ['English (Dolby Atmos)', 'Spanish (5.1)', 'French (5.1)'],
     subtitles: ['English [CC]', 'Spanish', 'French'],
     features: ['4K Ultra HD', 'Dolby Vision', 'Dolby Atmos'],
@@ -409,6 +399,144 @@ export async function fetchAllServerMoviesMultiFeed(page = 1): Promise<MediaItem
     console.warn('fetchAllServerMoviesMultiFeed error:', err);
     return [];
   }
+}
+
+export const SERIES_GENRES_LIST = [
+  { id: 0, name: 'All Genres' },
+  { id: 18, name: 'Drama' },
+  { id: 10765, name: 'Sci-Fi & Fantasy' },
+  { id: 10759, name: 'Action & Adventure' },
+  { id: 35, name: 'Comedy' },
+  { id: 80, name: 'Crime' },
+  { id: 9648, name: 'Mystery' },
+  { id: 16, name: 'Animation' },
+  { id: 99, name: 'Documentary' },
+  { id: 10751, name: 'Family' },
+];
+
+export type SeriesFeedType = 'popular' | 'trending' | 'top_rated' | 'on_the_air';
+
+export async function fetchServerSeries(options: {
+  feed?: SeriesFeedType;
+  page?: number;
+  genreId?: number;
+  query?: string;
+  sortBy?: string;
+}): Promise<FetchServerMoviesResult> {
+  const { feed = 'popular', page = 1, genreId, query, sortBy = 'popularity.desc' } = options;
+  const key = getTMDBApiKey();
+
+  try {
+    let url = '';
+    if (query && query.trim()) {
+      url = `${TMDB_BASE_URL}/search/tv?api_key=${key}&query=${encodeURIComponent(
+        query.trim()
+      )}&page=${page}&include_adult=false`;
+    } else if (genreId && genreId > 0) {
+      url = `${TMDB_BASE_URL}/discover/tv?api_key=${key}&with_genres=${genreId}&sort_by=${sortBy}&page=${page}&include_adult=false`;
+    } else {
+      switch (feed) {
+        case 'trending':
+          url = `${TMDB_BASE_URL}/trending/tv/week?api_key=${key}&page=${page}`;
+          break;
+        case 'top_rated':
+          url = `${TMDB_BASE_URL}/tv/top_rated?api_key=${key}&page=${page}`;
+          break;
+        case 'on_the_air':
+          url = `${TMDB_BASE_URL}/tv/on_the_air?api_key=${key}&page=${page}`;
+          break;
+        case 'popular':
+        default:
+          url = `${TMDB_BASE_URL}/tv/popular?api_key=${key}&page=${page}`;
+          break;
+      }
+    }
+
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      const rawResults: RawTMDBItem[] = data.results || [];
+      const items: MediaItem[] = rawResults
+        .filter((raw) => Boolean(raw.name && (raw.poster_path || raw.backdrop_path)))
+        .map((raw) => normalizeTMDBItem(raw, 'series'));
+
+      return {
+        items,
+        totalPages: Math.min(data.total_pages || 1, 500),
+        totalResults: data.total_results || items.length,
+        page,
+      };
+    }
+  } catch (err) {
+    console.warn('Error fetching server series from TMDB:', err);
+  }
+
+  return { items: [], totalPages: 1, totalResults: 0, page };
+}
+
+export async function fetchAllServerSeriesMultiFeed(page = 1): Promise<MediaItem[]> {
+  const key = getTMDBApiKey();
+  const endpoints = [
+    `${TMDB_BASE_URL}/tv/popular?api_key=${key}&page=${page}`,
+    `${TMDB_BASE_URL}/trending/tv/week?api_key=${key}&page=${page}`,
+    `${TMDB_BASE_URL}/tv/top_rated?api_key=${key}&page=${page}`,
+    `${TMDB_BASE_URL}/tv/on_the_air?api_key=${key}&page=${page}`,
+  ];
+
+  try {
+    const responses = await Promise.allSettled(
+      endpoints.map((url) => fetch(url).then((r) => (r.ok ? r.json() : null)))
+    );
+
+    const map = new Map<number, MediaItem>();
+    responses.forEach((res) => {
+      if (res.status === 'fulfilled' && res.value && Array.isArray(res.value.results)) {
+        res.value.results.forEach((raw: RawTMDBItem) => {
+          if (raw.id && raw.name && !map.has(raw.id)) {
+            map.set(raw.id, normalizeTMDBItem(raw, 'series'));
+          }
+        });
+      }
+    });
+
+    return Array.from(map.values());
+  } catch (err) {
+    console.warn('fetchAllServerSeriesMultiFeed error:', err);
+    return [];
+  }
+}
+
+/**
+ * Fetches movies or TV series directly from VixSrc & PrimeSrc indexed streaming servers (/api/servers/catalog).
+ */
+export async function fetchServerIndexedCatalog(
+  type: 'movie' | 'tv' = 'movie',
+  page = 1
+): Promise<FetchServerMoviesResult> {
+  try {
+    const res = await fetch(`/api/servers/catalog?type=${type}&page=${page}`);
+    if (res.ok) {
+      const data = (await res.json()) as {
+        items?: RawTMDBItem[];
+        page?: number;
+        totalPages?: number;
+        totalResults?: number;
+      };
+      const rawItems = Array.isArray(data.items) ? data.items : [];
+      const items = rawItems.map((raw) =>
+        normalizeTMDBItem(raw, type === 'tv' ? 'series' : 'movie')
+      );
+      return {
+        items,
+        page: data.page || page,
+        totalPages: data.totalPages || 1,
+        totalResults: data.totalResults || items.length,
+      };
+    }
+  } catch (err) {
+    console.warn('fetchServerIndexedCatalog error:', err);
+  }
+  return { items: [], page, totalPages: 1, totalResults: 0 };
 }
 
 // Safe live fetch: tries TMDB first (with default key), then falls back to free TVMaze

@@ -12,7 +12,8 @@ interface OfflineContextType {
     seasonNumber?: number,
     episodeNumber?: number,
     audioTrack?: string,
-    subtitleTrack?: string
+    subtitleTrack?: string,
+    customVideoUrl?: string
   ) => void;
   startBatchDownload: (
     media: MediaItem,
@@ -38,27 +39,39 @@ interface OfflineContextType {
 
 const OfflineContext = createContext<OfflineContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'mullahmax_offline_downloads_v4';
+const STORAGE_KEY = 'mullahmax_offline_downloads_v5';
 const SIMULATED_OFFLINE_KEY = 'mullahmax_simulated_offline';
 
+function cleanMediaVideoUrl(url?: string): string {
+  if (!url) return '';
+  const trimmed = url.trim();
+  if (
+    !trimmed ||
+    trimmed.includes('offline_media_sample.mp4') ||
+    trimmed.includes('googleapis.com') ||
+    trimmed.includes('commondatastorage') ||
+    trimmed.includes('storage.google')
+  ) {
+    return '';
+  }
+  return trimmed;
+}
+
 function sanitizeDownloadedItem(item: DownloadedItem): DownloadedItem {
-  const safeUrl =
-    !item.videoUrl ||
-    item.videoUrl.includes('googleapis.com') ||
-    item.videoUrl.includes('commondatastorage')
-      ? '/media/offline_media_sample.mp4'
-      : item.videoUrl;
   return {
     ...item,
-    videoUrl: safeUrl,
+    videoUrl: cleanMediaVideoUrl(item.videoUrl),
   };
 }
 
-// Initial pre-seeded demo downloads so user immediately has offline items ready to view
+// Initial pre-seeded downloads with exact TMDB/IMDb identity
 const INITIAL_DEMO_DOWNLOADS: DownloadedItem[] = [
   {
     id: 'dl-dune-part-two-4k',
     mediaId: 'dune-part-two',
+    tmdbId: 693134,
+    imdbId: 'tt15239678',
+    trailerYoutubeId: 'Way9Dexny3w',
     title: 'Dune: Part Two',
     type: 'movie',
     posterUrl: 'https://image.tmdb.org/t/p/w780/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg',
@@ -70,12 +83,15 @@ const INITIAL_DEMO_DOWNLOADS: DownloadedItem[] = [
     progress: 100,
     audioTrack: 'English (Dolby Atmos)',
     subtitleTrack: 'English [CC]',
-    videoUrl: '/media/offline_media_sample.mp4',
+    videoUrl: '',
     expiresInDays: 29,
   },
   {
     id: 'dl-deadpool-wolverine-1080p',
     mediaId: 'deadpool-and-wolverine',
+    tmdbId: 533535,
+    imdbId: 'tt6263850',
+    trailerYoutubeId: '73_1biulkYk',
     title: 'Deadpool & Wolverine',
     type: 'movie',
     posterUrl: 'https://image.tmdb.org/t/p/w780/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg',
@@ -87,12 +103,15 @@ const INITIAL_DEMO_DOWNLOADS: DownloadedItem[] = [
     progress: 100,
     audioTrack: 'English (Dolby Atmos)',
     subtitleTrack: 'English [CC]',
-    videoUrl: '/media/offline_media_sample.mp4',
+    videoUrl: '',
     expiresInDays: 27,
   },
   {
     id: 'dl-severance-s1-e1',
     mediaId: 'severance-apple',
+    tmdbId: 95396,
+    imdbId: 'tt11280740',
+    trailerYoutubeId: 'xEQP4VVuyrY',
     title: 'Severance',
     type: 'series',
     seasonNumber: 1,
@@ -107,7 +126,7 @@ const INITIAL_DEMO_DOWNLOADS: DownloadedItem[] = [
     progress: 100,
     audioTrack: 'English (Spatial Audio)',
     subtitleTrack: 'English [CC]',
-    videoUrl: '/media/offline_media_sample.mp4',
+    videoUrl: '',
     expiresInDays: 30,
   },
 ];
@@ -115,12 +134,13 @@ const INITIAL_DEMO_DOWNLOADS: DownloadedItem[] = [
 export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [downloads, setDownloads] = useState<DownloadedItem[]>(() => {
     try {
-      // Check current v4 key or migrate from v1/v2/v3
+      // Check current v5 key or migrate metadata cleanly from earlier keys while stripping bogus sample URLs
       const saved =
         localStorage.getItem(STORAGE_KEY) ||
-        localStorage.getItem('mullahmax_offline_downloads_v1') ||
+        localStorage.getItem('mullahmax_offline_downloads_v4') ||
+        localStorage.getItem('mullahmax_offline_downloads_v3') ||
         localStorage.getItem('mullahmax_offline_downloads_v2') ||
-        localStorage.getItem('mullahmax_offline_downloads_v3');
+        localStorage.getItem('mullahmax_offline_downloads_v1');
       if (saved) {
         const parsed = JSON.parse(saved) as DownloadedItem[];
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -209,12 +229,11 @@ export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ child
     seasonNumber?: number,
     episodeNumber?: number,
     audioTrack = 'English (Dolby Atmos)',
-    subtitleTrack = 'English [CC]'
+    subtitleTrack = 'English [CC]',
+    customVideoUrl?: string
   ) => {
-    // Generate id
     const downloadId = `dl-${media.id}${seasonNumber ? `-s${seasonNumber}-e${episodeNumber}` : ''}-${quality}`;
 
-    // Calculate download size
     let baseSize = 1450;
     if (media.type === 'movie' && media.durationMinutes) {
       baseSize = Math.round(media.durationMinutes * 12);
@@ -227,23 +246,23 @@ export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const multiplier = quality === '720p' ? 0.6 : quality === '4k' ? 2.4 : 1.0;
     const sizeMb = Math.round(baseSize * multiplier);
 
-    // Episode details if series
     let epTitle: string | undefined;
-    let videoUrl = media.videoPreviewUrl || '/media/offline_media_sample.mp4';
+    let videoUrl = cleanMediaVideoUrl(customVideoUrl) || cleanMediaVideoUrl(media.videoPreviewUrl);
     if (seasonNumber && episodeNumber && media.seasons) {
       const s = media.seasons.find((sn) => sn.seasonNumber === seasonNumber);
       const ep = s?.episodes.find((e) => e.episodeNumber === episodeNumber);
       epTitle = ep?.title;
-      if (ep?.videoUrl) videoUrl = ep.videoUrl;
-    }
-
-    if (videoUrl.includes('googleapis.com') || videoUrl.includes('commondatastorage')) {
-      videoUrl = '/media/offline_media_sample.mp4';
+      if (!customVideoUrl && ep?.videoUrl) {
+        videoUrl = cleanMediaVideoUrl(ep.videoUrl);
+      }
     }
 
     const newItem: DownloadedItem = {
       id: downloadId,
       mediaId: media.id,
+      tmdbId: media.tmdbId,
+      imdbId: media.imdbId,
+      trailerYoutubeId: media.trailerYoutubeId,
       title: media.title,
       type: media.type,
       seasonNumber,
@@ -283,6 +302,9 @@ export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return {
         id: downloadId,
         mediaId: media.id,
+        tmdbId: media.tmdbId,
+        imdbId: media.imdbId,
+        trailerYoutubeId: media.trailerYoutubeId,
         title: media.title,
         type: media.type,
         seasonNumber,
@@ -297,10 +319,7 @@ export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ child
         progress: 8 + (idx % 3) * 2,
         audioTrack,
         subtitleTrack,
-        videoUrl:
-          !ep.videoUrl || ep.videoUrl.includes('googleapis.com') || ep.videoUrl.includes('commondatastorage')
-            ? '/media/offline_media_sample.mp4'
-            : ep.videoUrl,
+        videoUrl: cleanMediaVideoUrl(ep.videoUrl),
         expiresInDays: 30,
       };
     });

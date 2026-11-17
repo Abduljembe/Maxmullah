@@ -5,26 +5,25 @@ import {
   Trash2,
   Pause,
   Download,
-  WifiOff,
-  Wifi,
-  Sparkles,
-  ArrowRight,
-  ShieldCheck,
   CheckCircle2,
   ArrowDownToLine,
 } from 'lucide-react';
 import { DownloadedItem, MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
 import { MEDIA_CATALOG } from '../../data/mediaData';
-import { downloadVideoFile } from '../../utils/fileDownloader';
+import { downloadVideoFile, isDirectStreamUrl } from '../../utils/fileDownloader';
 
 interface DownloadsViewProps {
+  catalog?: MediaItem[];
   onPlayDownloaded: (media: MediaItem, seasonNum?: number, episodeNum?: number) => void;
+  onDownloadItem?: (media: MediaItem, seasonNum?: number, episodeNum?: number) => void;
   onExploreCatalog: () => void;
 }
 
 export const DownloadsView: React.FC<DownloadsViewProps> = ({
+  catalog = [],
   onPlayDownloaded,
+  onDownloadItem,
   onExploreCatalog,
 }) => {
   const {
@@ -33,48 +32,73 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
     pauseDownload,
     resumeDownload,
     clearAllDownloads,
-    isOffline,
-    isSimulatedOffline,
-    toggleSimulatedOffline,
     storageStats,
   } = useOffline();
 
   const completedDownloads = downloads.filter((d) => d.status === 'completed');
   const activeDownloads = downloads.filter((d) => d.status !== 'completed');
 
-  const handlePlay = (item: DownloadedItem) => {
-    const parentMedia = MEDIA_CATALOG.find((m) => m.id === item.mediaId);
+  const resolveMediaFromDownload = (item: DownloadedItem): MediaItem => {
+    const combinedCatalog = [...catalog, ...MEDIA_CATALOG];
+    const parentMedia = combinedCatalog.find(
+      (m) =>
+        m.id === item.mediaId ||
+        (item.tmdbId && m.tmdbId === item.tmdbId) ||
+        (item.imdbId && m.imdbId === item.imdbId)
+    );
+
     if (parentMedia) {
-      onPlayDownloaded(parentMedia, item.seasonNumber, item.episodeNumber);
-    } else {
-      // Fallback synthetic media object if item was dynamically downloaded or ID changed
-      onPlayDownloaded(
-        {
-          id: item.mediaId,
-          title: item.title,
-          type: item.type,
-          year: 2024,
-          rating: 'PG-13',
-          imdbScore: 8.5,
-          rottenTomatoesScore: 90,
-          duration: 'Offline Feature',
-          genres: ['Cinema', 'Drama'],
-          platforms: ['Max', 'Netflix'],
-          primaryPlatform: 'Max',
-          tagline: 'Offline Vault Downloaded',
-          description: `${item.title} is downloaded and ready for offline playback.`,
-          cast: ['Lead Cast'],
-          posterUrl: item.posterUrl,
-          backdropUrl: item.backdropUrl,
-          videoPreviewUrl: item.videoUrl,
-          audioTracks: [item.audioTrack || 'English (Dolby Atmos)'],
-          subtitles: [item.subtitleTrack || 'English [CC]'],
-          features: ['4K Ultra HD', 'Offline Ready'],
-          moodTags: ['Offline Vault'],
-        },
-        item.seasonNumber,
-        item.episodeNumber
-      );
+      return parentMedia;
+    }
+
+    return {
+      id: item.mediaId,
+      tmdbId: item.tmdbId,
+      imdbId: item.imdbId,
+      trailerYoutubeId: item.trailerYoutubeId,
+      title: item.title,
+      type: item.type,
+      year: 2024,
+      rating: item.type === 'series' ? 'TV-MA' : 'PG-13',
+      imdbScore: 8.5,
+      rottenTomatoesScore: 90,
+      duration: item.type === 'series' ? 'Series' : 'Feature Film',
+      genres: ['Cinema', 'Drama'],
+      platforms: ['Max', 'Netflix'],
+      primaryPlatform: 'Max',
+      tagline: 'Saved to My Downloads',
+      description: `${item.title} is saved in your downloads library.`,
+      cast: ['Lead Cast'],
+      posterUrl: item.posterUrl,
+      backdropUrl: item.backdropUrl,
+      videoPreviewUrl: item.videoUrl,
+      audioTracks: [item.audioTrack || 'English (Dolby Atmos)'],
+      subtitles: [item.subtitleTrack || 'English [CC]'],
+      features: ['4K Ultra HD'],
+      moodTags: ['Downloaded'],
+    };
+  };
+
+  const handlePlay = (item: DownloadedItem) => {
+    const resolved = resolveMediaFromDownload(item);
+    onPlayDownloaded(resolved, item.seasonNumber, item.episodeNumber);
+  };
+
+  const handleSaveToDevice = async (item: DownloadedItem) => {
+    if (isDirectStreamUrl(item.videoUrl)) {
+      const fname =
+        item.type === 'series'
+          ? `${item.title}.S${String(item.seasonNumber || 1).padStart(2, '0')}E${String(
+              item.episodeNumber || 1
+            ).padStart(2, '0')}.${item.quality}.mp4`.replace(/[^a-zA-Z0-9.-]/g, '_')
+          : `${item.title}.${item.quality}.mp4`.replace(/[^a-zA-Z0-9.-]/g, '_');
+      await downloadVideoFile(item.videoUrl, fname);
+      return;
+    }
+
+    const resolved = resolveMediaFromDownload(item);
+    if (onDownloadItem) {
+      onDownloadItem(resolved, item.seasonNumber, item.episodeNumber);
     }
   };
 
@@ -87,7 +111,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             My Downloads
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
-            Downloaded movies and episodes ready to watch anytime, even offline.
+            Your saved movies and episodes ready to watch or download to your device.
           </p>
         </div>
 
@@ -95,7 +119,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
           {downloads.length > 0 && (
             <button
               onClick={() => {
-                if (window.confirm('Delete all downloaded titles from your device?')) {
+                if (window.confirm('Delete all downloaded titles from your library?')) {
                   clearAllDownloads();
                 }
               }}
@@ -129,7 +153,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             <div className="flex items-center gap-1.5">
               <span className="w-3 h-3 rounded-sm bg-rose-600" />
               <span className="text-slate-300">
-                MullahMax Vault ({(storageStats.usedByMullahMaxMb / 1024).toFixed(1)} GB)
+                MullahMax ({(storageStats.usedByMullahMaxMb / 1024).toFixed(1)} GB)
               </span>
             </div>
             <div className="flex items-center gap-1.5">
@@ -153,7 +177,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             style={{
               width: `${(storageStats.usedByMullahMaxMb / storageStats.totalDeviceMb) * 100}%`,
             }}
-            title="MullahMax Offline Storage"
+            title="MullahMax Storage"
           />
         </div>
       </div>
@@ -191,10 +215,11 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                       <span>·</span>
                       <span className="font-mono">{(item.sizeMb / 1024).toFixed(1)} GB</span>
                       <span>·</span>
-                      <span className="text-amber-400 font-semibold">{item.status} ({item.progress}%)</span>
+                      <span className="text-amber-400 font-semibold">
+                        {item.status} ({item.progress}%)
+                      </span>
                     </div>
 
-                    {/* Progress Bar */}
                     <div className="w-48 sm:w-64 h-1.5 bg-white/10 rounded-full mt-2 overflow-hidden">
                       <div
                         className="h-full bg-rose-600 transition-all duration-300"
@@ -236,16 +261,13 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
         </div>
       )}
 
-      {/* Completed Offline Vault Items */}
+      {/* Completed Downloads */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-bold text-white font-display flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            Downloaded &amp; Ready Offline ({completedDownloads.length})
+            Downloaded Titles ({completedDownloads.length})
           </h2>
-          <span className="text-xs text-slate-400">
-            Playback works with 0% internet connection
-          </span>
         </div>
 
         {completedDownloads.length === 0 ? (
@@ -253,11 +275,9 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             <div className="w-16 h-16 rounded-2xl bg-rose-600/20 text-rose-400 flex items-center justify-center mx-auto">
               <HardDrive className="w-8 h-8" />
             </div>
-            <h3 className="text-lg font-bold text-white font-display">
-              Your Offline Vault is Empty
-            </h3>
+            <h3 className="text-lg font-bold text-white font-display">Your Downloads Are Empty</h3>
             <p className="text-xs text-slate-400 max-w-md mx-auto">
-              Download movies and episodes before you travel or go off-grid. They'll appear here for offline viewing anytime.
+              Save any movie or series episode to watch quickly or download directly to your device.
             </p>
             <button
               onClick={onExploreCatalog}
@@ -296,7 +316,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                       </span>
                       <span className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" />
-                        Cached Local
+                        Ready
                       </span>
                     </div>
 
@@ -311,7 +331,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
                       <span className="font-mono">{(item.sizeMb / 1024).toFixed(1)} GB</span>
                       <span>·</span>
-                      <span>{item.audioTrack}</span>
+                      <span className="truncate">{item.audioTrack}</span>
                     </div>
                   </div>
                 </div>
@@ -326,14 +346,9 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   </button>
 
                   <button
-                    onClick={async () => {
-                      const fname = item.type === 'series'
-                        ? `${item.title}.S0${item.seasonNumber || 1}E0${item.episodeNumber || 1}.${item.quality}.mp4`.replace(/[^a-zA-Z0-9.-]/g, '_')
-                        : `${item.title}.${item.quality}.mp4`.replace(/[^a-zA-Z0-9.-]/g, '_');
-                      await downloadVideoFile(item.videoUrl, fname);
-                    }}
+                    onClick={() => handleSaveToDevice(item)}
                     className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-rose-300 hover:text-white transition-colors cursor-pointer"
-                    title="Save .mp4 video file to your device Downloads folder"
+                    title="Download movie file to your device"
                   >
                     <ArrowDownToLine className="w-4 h-4" />
                   </button>
@@ -341,7 +356,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   <button
                     onClick={() => removeDownload(item.id)}
                     className="p-2 rounded-xl text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                    title="Remove from offline vault"
+                    title="Remove from downloads"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>

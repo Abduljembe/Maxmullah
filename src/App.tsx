@@ -36,8 +36,13 @@ import { SeriesEpisodePickerModal } from './components/modals/SeriesEpisodePicke
 import { SearchDrawer } from './components/search/SearchDrawer';
 import { DownloadsView } from './components/views/DownloadsView';
 import { MoviesView } from './components/views/MoviesView';
+import { SeriesView } from './components/views/SeriesView';
 import { TMDBSettingsModal } from './components/modals/TMDBSettingsModal';
-import { fetchLiveTrending, fetchServerMovies } from './services/tmdbService';
+import {
+  fetchLiveTrending,
+  fetchServerMovies,
+  fetchServerIndexedCatalog,
+} from './services/tmdbService';
 import {
   getPersonalizedRecommendations,
   getBecauseYouWatched,
@@ -107,14 +112,16 @@ function MainAppContent() {
     });
   };
 
-  // Live Server Movies & Series Loader
+  // Live Server Movies & Series Loader (VixSrc / PrimeSrc index + TMDB feeds)
   const loadLiveTMDB = async () => {
     if (isOffline) return;
     setIsSyncingLive(true);
     try {
-      const [liveItems, popularMovies] = await Promise.allSettled([
+      const [liveItems, popularMovies, serverMovies, serverSeries] = await Promise.allSettled([
         fetchLiveTrending('all'),
         fetchServerMovies({ feed: 'popular', page: 1 }),
+        fetchServerIndexedCatalog('movie', 1),
+        fetchServerIndexedCatalog('tv', 1),
       ]);
 
       const itemsToAdd: MediaItem[] = [];
@@ -123,6 +130,12 @@ function MainAppContent() {
       }
       if (popularMovies.status === 'fulfilled' && popularMovies.value?.items) {
         itemsToAdd.push(...popularMovies.value.items);
+      }
+      if (serverMovies.status === 'fulfilled' && serverMovies.value?.items) {
+        itemsToAdd.push(...serverMovies.value.items);
+      }
+      if (serverSeries.status === 'fulfilled' && serverSeries.value?.items) {
+        itemsToAdd.push(...serverSeries.value.items);
       }
 
       if (itemsToAdd.length > 0) {
@@ -241,8 +254,12 @@ function MainAppContent() {
         {/* DOWNLOADS / OFFLINE VAULT VIEW */}
         {currentTab === 'downloads' && (
           <DownloadsView
+            catalog={catalog}
             onPlayDownloaded={(media, seasonNum, episodeNum) =>
               setPlayingMedia({ media, seasonNum, episodeNum })
+            }
+            onDownloadItem={(media, seasonNum, episodeNum) =>
+              setDownloadTarget({ media, seasonNum, episodeNum })
             }
             onExploreCatalog={() => setCurrentTab('home')}
           />
@@ -469,59 +486,14 @@ function MainAppContent() {
           />
         )}
 
-        {/* SERIES ONLY TAB */}
+        {/* SERIES ONLY TAB (Fetches live series from servers) */}
         {currentTab === 'series' && (
-          <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto py-8 space-y-8">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-6 border-b border-white/10">
-              <div>
-                <h1 className="text-3xl font-black text-white font-display">
-                  Series
-                </h1>
-                <p className="text-xs text-slate-400 mt-1">
-                  Stream complete seasons or download episodes to watch offline.
-                </p>
-              </div>
-
-              {/* Streaming Platform Filter */}
-              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-                <button
-                  onClick={() => setSelectedPlatform('ALL')}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
-                    selectedPlatform === 'ALL'
-                      ? 'bg-white text-slate-950 font-bold'
-                      : 'bg-white/5 text-slate-300 hover:bg-white/10'
-                  }`}
-                >
-                  All
-                </button>
-                {['Netflix', 'Max', 'Apple TV+', 'Disney+', 'Hulu', 'Crunchyroll'].map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setSelectedPlatform(p as StreamingPlatform)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
-                      selectedPlatform === p
-                        ? 'bg-rose-600 text-white font-bold'
-                        : 'bg-white/5 text-slate-300 hover:bg-white/10'
-                    }`}
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
-              {seriesOnly.map((series) => (
-                <MediaCard
-                  key={series.id}
-                  media={series}
-                  onSelect={setSelectedMedia}
-                  onPlay={(m) => handlePlayMedia(m)}
-                  onDownload={(m) => setDownloadTarget({ media: m })}
-                />
-              ))}
-            </div>
-          </div>
+          <SeriesView
+            onSelectSeries={setSelectedMedia}
+            onPlaySeries={(m) => handlePlayMedia(m)}
+            onDownloadSeries={(m) => setDownloadTarget({ media: m })}
+            initialCatalogSeries={seriesOnly}
+          />
         )}
 
         {/* ALL PLATFORMS EXPLORATION TAB */}

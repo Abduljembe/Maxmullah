@@ -313,11 +313,15 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
                   return (
                     <div
                       key={ep.episodeNumber}
-                      className="group flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/5 transition-all"
+                      onClick={() => onPlay(selectedSeason, ep.episodeNumber)}
+                      className="group flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/5 transition-all cursor-pointer"
                     >
                       <div className="flex items-start gap-4">
                         <button
-                          onClick={() => onPlay(selectedSeason, ep.episodeNumber)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPlay(selectedSeason, ep.episodeNumber);
+                          }}
                           className="w-10 h-10 rounded-full bg-white/10 group-hover:bg-rose-600 flex items-center justify-center text-white shrink-0 transition-colors cursor-pointer mt-0.5"
                         >
                           <Play className="w-4 h-4 fill-current ml-0.5" />
@@ -339,7 +343,10 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
                       {/* Download Episode Button */}
                       <div className="flex items-center justify-end shrink-0 sm:self-center">
                         <button
-                          onClick={() => onOpenDownload(selectedSeason, ep.episodeNumber)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenDownload(selectedSeason, ep.episodeNumber);
+                          }}
                           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                             epDownloaded
                               ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'

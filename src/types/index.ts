@@ -88,6 +88,9 @@ export type DownloadQuality = '720p' | '1080p' | '4k';
 export interface DownloadedItem {
   id: string; // unique download id
   mediaId: string;
+  tmdbId?: number;
+  imdbId?: string;
+  trailerYoutubeId?: string;
   title: string;
   type: MediaType;
   seasonNumber?: number;
