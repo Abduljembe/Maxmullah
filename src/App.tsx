@@ -37,6 +37,7 @@ import { SearchDrawer } from './components/search/SearchDrawer';
 import { DownloadsView } from './components/views/DownloadsView';
 import { MoviesView } from './components/views/MoviesView';
 import { SeriesView } from './components/views/SeriesView';
+import { TrendingAndNewSection } from './components/views/TrendingAndNewSection';
 import { TMDBSettingsModal } from './components/modals/TMDBSettingsModal';
 import {
   fetchLiveTrending,
@@ -165,6 +166,28 @@ function MainAppContent() {
     }
   };
 
+  const mergeCatalogItems = (incomingItems: MediaItem[]) => {
+    if (!incomingItems || incomingItems.length === 0) return;
+    setCatalog((prev) => {
+      const map = new Map<string, MediaItem>();
+      prev.forEach((item) => map.set(item.id, item));
+      let added = false;
+      incomingItems.forEach((item) => {
+        const alreadyExists = Array.from(map.values()).some(
+          (m) =>
+            m.id === item.id ||
+            (m.tmdbId && item.tmdbId && m.tmdbId === item.tmdbId) ||
+            m.title.toLowerCase() === item.title.toLowerCase()
+        );
+        if (!alreadyExists) {
+          map.set(item.id, item);
+          added = true;
+        }
+      });
+      return added ? Array.from(map.values()) : prev;
+    });
+  };
+
   useEffect(() => {
     loadLiveTMDB();
   }, [isOffline]);
@@ -209,11 +232,6 @@ function MainAppContent() {
   // Top critically acclaimed (RT 95%+)
   const criticallyAcclaimed = useMemo(() => {
     return catalog.filter((item) => item.rottenTomatoesScore >= 94);
-  }, [catalog]);
-
-  // Trending blockbusters (Epic films with high RT / IMDb ratings)
-  const trendingBlockbusters = useMemo(() => {
-    return catalog.filter((item) => item.type === 'movie' && (item.imdbScore >= 7.8 || item.rottenTomatoesScore >= 80));
   }, [catalog]);
 
   // Sci-Fi, Adventure & Mind-Bending epics
@@ -281,6 +299,18 @@ function MainAppContent() {
             <PlatformFilterBar
               selectedPlatform={selectedPlatform}
               onSelectPlatform={setSelectedPlatform}
+            />
+
+            {/* Trending (Today | This Week) & New Movies & Releases */}
+            <TrendingAndNewSection
+              selectedPlatform={selectedPlatform}
+              fallbackCatalog={platformFilteredCatalog}
+              onSelect={setSelectedMedia}
+              onPlay={(m) => handlePlayMedia(m)}
+              onDownload={(m) => setDownloadTarget({ media: m })}
+              onViewAllMovies={() => setCurrentTab('movies')}
+              onViewAllSeries={() => setCurrentTab('series')}
+              onItemsLoaded={mergeCatalogItems}
             />
 
             {/* TV Series Row */}
@@ -368,34 +398,6 @@ function MainAppContent() {
 
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
                 {criticallyAcclaimed.map((item) => (
-                  <MediaCard
-                    key={item.id}
-                    media={item}
-                    onSelect={setSelectedMedia}
-                    onPlay={(m) => handlePlayMedia(m)}
-                    onDownload={(m) => setDownloadTarget({ media: m })}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Section 4: Trending Movies */}
-            <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl sm:text-2xl font-black text-white font-display">
-                  Trending Movies
-                </h2>
-                <button
-                  onClick={() => setCurrentTab('movies')}
-                  className="text-xs text-rose-400 hover:text-rose-300 font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <span>View All</span>
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
-                {trendingBlockbusters.slice(0, 8).map((item) => (
                   <MediaCard
                     key={item.id}
                     media={item}

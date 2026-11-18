@@ -9,8 +9,7 @@ import {
   CheckCircle2,
   Clock,
   Layers,
-  ChevronRight,
-  ArrowRight,
+  Star,
 } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { ensureMediaSeasons } from '../../utils/seriesUtils';
@@ -103,10 +102,15 @@ export const SeriesEpisodePickerModal: React.FC<SeriesEpisodePickerModalProps> =
                 <span className="text-xs text-slate-300 font-semibold">{media.rating}</span>
                 <span className="text-white/40">·</span>
                 <span className="text-xs text-slate-300">{media.duration}</span>
-                <span className="text-white/40">·</span>
-                <span className="text-xs text-emerald-400 font-bold">
-                  {media.rottenTomatoesScore}% RT
-                </span>
+                {media.imdbScore > 0 && (
+                  <>
+                    <span className="text-white/40">·</span>
+                    <span className="inline-flex items-center gap-1 text-xs text-amber-400 font-bold tabular-nums">
+                      <Star className="w-3.5 h-3.5 fill-amber-400" />
+                      {media.imdbScore.toFixed(1)}
+                    </span>
+                  </>
+                )}
               </div>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-white font-display tracking-tight truncate max-w-lg">
                 {media.title}

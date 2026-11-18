@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Sparkles, Clock, Compass, Play, Download, Check } from 'lucide-react';
+import { X, Sparkles, Play, Check, Star } from 'lucide-react';
 import { MediaItem, StreamingPlatform } from '../../types';
 import { useProfile } from '../../context/ProfileContext';
 import { PLATFORM_INFO } from '../../data/mediaData';
@@ -192,17 +192,19 @@ export const VibeMatcherModal: React.FC<VibeMatcherModalProps> = ({
                     className="w-12 h-16 object-cover rounded-lg shrink-0 border border-white/10"
                   />
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-[11px] font-bold text-rose-400 flex items-center gap-1">
-                        <Sparkles className="w-3 h-3" />
-                        {matchScore}% Match
-                      </span>
+                    <div className="flex items-center gap-2 mb-1 text-[11px] text-slate-300 tabular-nums">
+                      {item.imdbScore > 0 && (
+                        <>
+                          <span className="inline-flex items-center gap-1 font-bold text-amber-400">
+                            <Star className="w-3 h-3 fill-amber-400" />
+                            {item.imdbScore.toFixed(1)}
+                          </span>
+                          <span className="text-slate-500">·</span>
+                        </>
+                      )}
+                      <span>{item.year}</span>
                       <span className="text-slate-500">·</span>
-                      <span className="text-[11px] text-slate-300">{item.duration}</span>
-                      <span className="text-slate-500">·</span>
-                      <span className="text-[11px] text-emerald-400 font-bold">
-                        RT {item.rottenTomatoesScore}%
-                      </span>
+                      <span>{item.duration}</span>
                     </div>
 
                     <h4 className="text-sm font-bold text-white truncate">{item.title}</h4>

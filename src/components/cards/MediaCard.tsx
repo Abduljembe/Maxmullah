@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Download, Check, HardDrive, Info } from 'lucide-react';
+import { Play, Download, Check, HardDrive, Info, Star } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
 import { useProfile } from '../../context/ProfileContext';
@@ -12,6 +12,7 @@ interface MediaCardProps {
   onPlay: (media: MediaItem) => void;
   onDownload: (media: MediaItem) => void;
   showMatchScore?: boolean;
+  showReleaseDate?: boolean;
 }
 
 export const MediaCard: React.FC<MediaCardProps> = ({
@@ -25,6 +26,8 @@ export const MediaCard: React.FC<MediaCardProps> = ({
 
   const isDownloaded = isMediaDownloaded(media.id);
   const inWatchlist = isInWatchlist(media.id);
+  const hasRealRating = typeof media.imdbScore === 'number' && media.imdbScore > 0;
+  const typeLabel = media.type === 'series' ? 'SERIES' : 'MOVIE';
 
   const handleMouseEnter = () => {
     const stream = generateStreamSource(media);
@@ -35,10 +38,10 @@ export const MediaCard: React.FC<MediaCardProps> = ({
     <div
       onClick={() => onPlay(media)}
       onMouseEnter={handleMouseEnter}
-      className="group relative rounded-2xl overflow-hidden bg-[#0E121B] border border-white/8 hover:border-white/25 transition-all duration-200 hover:-translate-y-1.5 shadow-lg flex flex-col cursor-pointer select-none"
+      className="group relative flex flex-col cursor-pointer select-none"
     >
       {/* Poster Image Container */}
-      <div className="relative aspect-[2/3] w-full overflow-hidden bg-slate-900">
+      <div className="relative aspect-[2/3] w-full rounded-xl overflow-hidden bg-[#121622] border border-white/10 group-hover:border-white/30 transition-all duration-200 group-hover:-translate-y-1 shadow-lg">
         <img
           src={media.posterUrl}
           alt={media.title}
@@ -47,32 +50,53 @@ export const MediaCard: React.FC<MediaCardProps> = ({
           className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
         />
 
-        {/* Ambient Bottom Gradient Scrim */}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0E121B] via-transparent to-black/20 opacity-75 group-hover:opacity-55 transition-opacity" />
+        {/* Subtle Top/Bottom Contrast Scrim */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/35 opacity-80 group-hover:opacity-60 transition-opacity" />
 
-        {/* Minimal Downloaded Indicator Only */}
-        {isDownloaded && (
-          <div className="absolute top-2.5 right-2.5 text-[10px] font-semibold text-emerald-300 bg-black/75 backdrop-blur-md px-2 py-0.5 rounded flex items-center gap-1 pointer-events-none">
-            <HardDrive className="w-2.5 h-2.5" />
-            <span>Saved</span>
+        {/* Top-Left: Real Star Rating (only when rated > 0) */}
+        {hasRealRating && (
+          <div className="absolute top-2 left-2 z-10 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md text-xs font-bold text-white tabular-nums pointer-events-none">
+            <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />
+            <span>{media.imdbScore.toFixed(1)}</span>
           </div>
         )}
 
+        {/* Top-Right: MOVIE / SERIES Type Tag + Offline Disk Indicator */}
+        <div className="absolute top-2 right-2 z-10 flex items-center gap-1 pointer-events-none">
+          {isDownloaded && (
+            <span
+              className="p-1 rounded-md bg-emerald-600/90 text-white"
+              title="Downloaded Offline"
+            >
+              <HardDrive className="w-3 h-3" />
+            </span>
+          )}
+          <span
+            className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide uppercase backdrop-blur-md ${
+              media.type === 'series'
+                ? 'bg-indigo-600/95 text-white'
+                : 'bg-black/75 text-slate-100 border border-white/15'
+            }`}
+          >
+            {typeLabel}
+          </span>
+        </div>
+
         {/* 1-Click Play Hover Overlay */}
-        <div className="absolute inset-0 bg-black/55 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex flex-col items-center justify-center gap-3 p-4">
+        <div className="absolute inset-0 z-20 bg-black/55 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex flex-col items-center justify-center gap-3 p-3">
           <button
             onClick={(e) => {
               e.stopPropagation();
               onPlay(media);
             }}
-            className="w-13 h-13 rounded-full bg-white text-slate-950 hover:bg-slate-200 flex items-center justify-center shadow-2xl transform group-hover:scale-105 transition-all cursor-pointer"
+            className="w-12 h-12 rounded-full bg-white text-slate-950 hover:bg-slate-200 flex items-center justify-center shadow-2xl transform group-hover:scale-105 transition-all cursor-pointer"
             title={media.type === 'series' ? 'Play Series' : 'Play Movie'}
             aria-label={`Play ${media.title}`}
           >
-            <Play className="w-6 h-6 fill-current ml-0.5" />
+            <Play className="w-5 h-5 fill-current ml-0.5" />
           </button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -82,7 +106,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               title="Details & Episodes"
               aria-label={`More info about ${media.title}`}
             >
-              <Info className="w-4 h-4" />
+              <Info className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -94,7 +118,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               title="Download"
               aria-label={`Download ${media.title}`}
             >
-              <Download className="w-4 h-4" />
+              <Download className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -108,24 +132,21 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               title={inWatchlist ? 'In My List' : 'Add to My List'}
               aria-label={inWatchlist ? `Remove ${media.title} from list` : `Add ${media.title} to list`}
             >
-              <Check className={`w-4 h-4 ${inWatchlist ? 'stroke-[3]' : 'opacity-70'}`} />
+              <Check className={`w-3.5 h-3.5 ${inWatchlist ? 'stroke-[3]' : 'opacity-70'}`} />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Clean Card Metadata Footer */}
-      <div className="p-3 flex flex-col justify-between flex-1">
-        <h3 className="text-sm font-bold text-white font-display truncate leading-snug group-hover:text-rose-400 transition-colors">
+      {/* Clean Card Title & Type · Year Footer */}
+      <div className="pt-2 px-0.5 space-y-0.5">
+        <h3 className="text-[13px] font-bold text-white font-display truncate leading-snug group-hover:text-rose-400 transition-colors">
           {media.title}
         </h3>
-
-        <div className="flex items-center gap-1.5 text-xs text-slate-400 mt-1 font-medium tabular-nums">
+        <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium tabular-nums">
+          <span>{media.type === 'series' ? 'Series' : 'Movie'}</span>
+          <span aria-hidden="true" className="text-slate-600">·</span>
           <span>{media.year}</span>
-          <span aria-hidden="true" className="text-slate-600">·</span>
-          <span className="truncate">{media.type === 'series' ? 'Series' : media.duration}</span>
-          <span aria-hidden="true" className="text-slate-600">·</span>
-          <span className="text-emerald-400 font-semibold">{media.rottenTomatoesScore}%</span>
         </div>
       </div>
     </div>

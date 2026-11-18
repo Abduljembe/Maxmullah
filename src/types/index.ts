@@ -34,6 +34,7 @@ export interface MediaItem {
   title: string;
   type: MediaType;
   year: number;
+  releaseDate?: string;
   rating: string; // e.g. "TV-MA", "PG-13", "R"
   imdbScore: number;
   rottenTomatoesScore: number;

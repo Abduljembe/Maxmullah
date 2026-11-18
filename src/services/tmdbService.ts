@@ -144,7 +144,8 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
     forcedType || (raw.media_type === 'tv' || (!raw.title && !!raw.name) ? 'series' : 'movie');
 
   const title = raw.title || raw.name || 'Untitled Feature';
-  const releaseYear = (raw.release_date || raw.first_air_date || '2025').slice(0, 4);
+  const rawDate = raw.release_date || raw.first_air_date || '';
+  const releaseYear = (rawDate || '2025').slice(0, 4);
   const year = parseInt(releaseYear, 10) || 2025;
 
   const genres: string[] = [];
@@ -228,8 +229,9 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
     cast.push('Ensemble Cast', 'International Performers');
   }
 
-  const imdbScore = Math.max(6.0, Math.min(9.5, Number((raw.vote_average || 7.5).toFixed(1))));
-  const rottenTomatoesScore = Math.min(99, Math.max(60, Math.round(imdbScore * 10.5)));
+  const rawVote = typeof raw.vote_average === 'number' ? raw.vote_average : 0;
+  const imdbScore = rawVote > 0 ? Number(rawVote.toFixed(1)) : 0;
+  const rottenTomatoesScore = imdbScore > 0 ? Math.min(100, Math.round(imdbScore * 10)) : 0;
 
   const resolvedTmdbId =
     raw.moviedb_id && raw.moviedb_id > 0
@@ -249,6 +251,7 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
     title,
     type,
     year,
+    releaseDate: rawDate || undefined,
     rating: type === 'series' ? 'TV-MA' : 'PG-13',
     imdbScore,
     rottenTomatoesScore,
@@ -291,9 +294,10 @@ interface TVMazeShow {
 function normalizeTVMazeShow(show: TVMazeShow): MediaItem {
   const cleanSummary = (show.summary || '').replace(/<[^>]*>?/gm, '').trim();
   const year = show.premiered ? parseInt(show.premiered.slice(0, 4), 10) || 2024 : 2024;
-  const ratingAvg = show.rating?.average || 8.0;
-  const imdbScore = Number(ratingAvg.toFixed(1));
-  const rottenTomatoesScore = Math.min(99, Math.round(imdbScore * 10.8));
+  const ratingAvg =
+    typeof show.rating?.average === 'number' && show.rating.average > 0 ? show.rating.average : 0;
+  const imdbScore = ratingAvg > 0 ? Number(ratingAvg.toFixed(1)) : 0;
+  const rottenTomatoesScore = imdbScore > 0 ? Math.min(100, Math.round(imdbScore * 10)) : 0;
 
   const platformsSet = new Set<StreamingPlatform>();
   const networkName = show.webChannel?.name || show.network?.name || '';
@@ -589,28 +593,28 @@ export async function fetchServerIndexedCatalog(
 // Safe live fetch: tries backend TMDB proxy first, then falls back to free TVMaze
 export async function fetchLiveTrending(
   type: 'all' | 'movie' | 'tv' = 'all',
-  page = 1
+  page = 1,
+  timeWindow: 'day' | 'week' = 'week'
 ): Promise<MediaItem[]> {
   try {
     if (type === 'all') {
-      const [movieData, tvData] = await Promise.all([
-        tmdbFetchJson<{ results?: RawTMDBItem[] }>('trending/movie/week', { page }),
-        tmdbFetchJson<{ results?: RawTMDBItem[] }>('trending/tv/week', { page }),
-      ]);
-      const items: MediaItem[] = [];
-      if (movieData?.results) {
-        items.push(...movieData.results.map((r) => normalizeTMDBItem(r, 'movie')));
-      }
-      if (tvData?.results) {
-        items.push(...tvData.results.map((r) => normalizeTMDBItem(r, 'series')));
-      }
-      if (items.length > 0) return items;
-    } else {
-      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(`trending/${type}/week`, { page });
+      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(`trending/all/${timeWindow}`, { page });
       if (data?.results) {
-        return data.results.map((item) =>
-          normalizeTMDBItem(item, type === 'movie' ? 'movie' : 'series')
-        );
+        const items = data.results
+          .filter(
+            (r) =>
+              (r.media_type === 'movie' || r.media_type === 'tv' || !r.media_type) &&
+              Boolean(r.poster_path || r.backdrop_path)
+          )
+          .map((r) => normalizeTMDBItem(r));
+        if (items.length > 0) return items;
+      }
+    } else {
+      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(`trending/${type}/${timeWindow}`, { page });
+      if (data?.results) {
+        return data.results
+          .filter((r) => Boolean(r.poster_path || r.backdrop_path))
+          .map((item) => normalizeTMDBItem(item, type === 'movie' ? 'movie' : 'series'));
       }
     }
   } catch {}
@@ -626,6 +630,37 @@ export async function fetchLiveTrending(
     console.warn('TVMaze live catalog fetch fallback', err);
   }
 
+  return [];
+}
+
+export type NewReleaseFeedTab = 'now_playing' | 'upcoming' | 'popular' | 'on_tv';
+
+export async function fetchNewReleasesFeed(tab: NewReleaseFeedTab, page = 1): Promise<MediaItem[]> {
+  try {
+    if (tab === 'on_tv') {
+      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>('tv/on_the_air', { page });
+      if (data?.results) {
+        return data.results
+          .filter((raw) => Boolean(raw.name && (raw.poster_path || raw.backdrop_path)))
+          .map((raw) => normalizeTMDBItem(raw, 'series'));
+      }
+      return [];
+    }
+
+    const endpointMap: Record<Exclude<NewReleaseFeedTab, 'on_tv'>, string> = {
+      now_playing: 'movie/now_playing',
+      upcoming: 'movie/upcoming',
+      popular: 'movie/popular',
+    };
+    const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(endpointMap[tab], { page });
+    if (data?.results) {
+      return data.results
+        .filter((raw) => Boolean(raw.title && (raw.poster_path || raw.backdrop_path)))
+        .map((raw) => normalizeTMDBItem(raw, 'movie'));
+    }
+  } catch (err) {
+    console.warn('fetchNewReleasesFeed error:', err);
+  }
   return [];
 }
 

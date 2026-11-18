@@ -7,17 +7,14 @@ import {
   Check,
   ThumbsUp,
   ThumbsDown,
-  Sparkles,
   Share2,
   HardDrive,
-  Film,
-  Tv,
+  Star,
 } from 'lucide-react';
-import { MediaItem, StreamingPlatform } from '../../types';
+import { MediaItem } from '../../types';
 import { PLATFORM_INFO } from '../../data/mediaData';
 import { useOffline } from '../../context/OfflineContext';
 import { useProfile } from '../../context/ProfileContext';
-import { calculateMatchScore } from '../../utils/recommendationEngine';
 import { ensureMediaSeasons } from '../../utils/seriesUtils';
 
 interface MediaDetailModalProps {
@@ -39,7 +36,6 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
 }) => {
   const { isMediaDownloaded, getDownloadedMedia } = useOffline();
   const {
-    currentProfile,
     isInWatchlist,
     toggleWatchlist,
     getMediaRating,
@@ -53,11 +49,7 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
   const rating = getMediaRating(media.id);
   const downloaded = isMediaDownloaded(media.id);
   const downloadedItem = getDownloadedMedia(media.id);
-
-  const { score: matchScore, reasons: matchReasons } = calculateMatchScore(
-    media,
-    currentProfile
-  );
+  const hasRealRating = typeof media.imdbScore === 'number' && media.imdbScore > 0;
 
   const seasons = ensureMediaSeasons(media);
   const currentSeasonData = seasons.find((s) => s.seasonNumber === selectedSeason) || seasons[0];
@@ -105,8 +97,15 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
           {/* Floating Hero Info */}
           <div className="absolute bottom-6 left-6 right-6">
             <div className="flex items-center gap-2 mb-2 flex-wrap text-xs font-medium text-slate-300">
-              <span className="text-emerald-400 font-bold tabular-nums">{matchScore}% Match</span>
-              <span aria-hidden="true" className="text-slate-500">·</span>
+              {hasRealRating && (
+                <>
+                  <span className="inline-flex items-center gap-1 text-amber-400 font-bold tabular-nums">
+                    <Star className="w-3.5 h-3.5 fill-amber-400" />
+                    {media.imdbScore.toFixed(1)}
+                  </span>
+                  <span aria-hidden="true" className="text-slate-500">·</span>
+                </>
+              )}
               <span>{media.year}</span>
               <span aria-hidden="true" className="text-slate-500">·</span>
               <span>{media.rating}</span>
@@ -123,14 +122,6 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
             {media.tagline && (
               <p className="text-xs sm:text-sm text-slate-300 italic mt-1 max-w-xl">
                 "{media.tagline}"
-              </p>
-            )}
-
-            {/* Match Reason Banner */}
-            {matchReasons.length > 0 && (
-              <p className="text-xs text-amber-300/90 mt-2 font-medium flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                {matchReasons[0]}
               </p>
             )}
 
@@ -395,9 +386,14 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
                     </div>
                     <div className="p-3">
                       <h4 className="text-xs font-bold text-white truncate">{item.title}</h4>
-                      <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1 tabular-nums">
                         <span>{item.year}</span>
-                        <span className="text-rose-400 font-bold">{item.rottenTomatoesScore}%</span>
+                        {item.imdbScore > 0 && (
+                          <span className="inline-flex items-center gap-1 text-amber-400 font-bold">
+                            <Star className="w-3 h-3 fill-amber-400" />
+                            {item.imdbScore.toFixed(1)}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>

@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Download, Info, HardDrive, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Play, Download, Info, HardDrive, ChevronLeft, ChevronRight, Star } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
-import { useProfile } from '../../context/ProfileContext';
-import { calculateMatchScore } from '../../utils/recommendationEngine';
 
 interface HeroSpotlightProps {
   featuredItems: MediaItem[];
@@ -41,7 +39,6 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
   }, [activeIndex]);
 
   const { isMediaDownloaded } = useOffline();
-  const { currentProfile } = useProfile();
 
   if (!currentItem) return null;
 
@@ -56,7 +53,7 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
   };
 
   const isDownloaded = isMediaDownloaded(currentItem.id);
-  const { score: matchScore } = calculateMatchScore(currentItem, currentProfile);
+  const hasRealRating = typeof currentItem.imdbScore === 'number' && currentItem.imdbScore > 0;
 
   return (
     <div
@@ -100,8 +97,15 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
         <div className="max-w-2xl lg:max-w-3xl space-y-3.5">
           {/* Clean Unboxed Metadata Line */}
           <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm font-medium text-slate-300">
-            <span className="text-emerald-400 font-bold tabular-nums">{matchScore}% Match</span>
-            <span aria-hidden="true" className="text-slate-500">·</span>
+            {hasRealRating && (
+              <>
+                <span className="inline-flex items-center gap-1 text-amber-400 font-bold tabular-nums">
+                  <Star className="w-3.5 h-3.5 fill-amber-400" />
+                  {currentItem.imdbScore.toFixed(1)}
+                </span>
+                <span aria-hidden="true" className="text-slate-500">·</span>
+              </>
+            )}
             <span>{currentItem.year}</span>
             <span aria-hidden="true" className="text-slate-500">·</span>
             <span className="text-slate-200">{currentItem.rating}</span>

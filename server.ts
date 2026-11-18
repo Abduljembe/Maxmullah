@@ -206,6 +206,7 @@ function mapCinemetaToTMDBShape(
   const yearMatch = (meta.releaseInfo || '').match(/\d{4}/);
   const yearStr = yearMatch ? `${yearMatch[0]}-01-01` : '2024-01-01';
   const tmdbNumeric = meta.moviedb_id && meta.moviedb_id > 0 ? meta.moviedb_id : 0;
+  const parsedRating = parseFloat(meta.imdbRating || '');
 
   return {
     id: tmdbNumeric,
@@ -219,7 +220,7 @@ function mapCinemetaToTMDBShape(
     release_date: !isTv ? yearStr : undefined,
     first_air_date: isTv ? yearStr : undefined,
     overview: meta.description || '',
-    vote_average: parseFloat(meta.imdbRating || '7.6') || 7.6,
+    vote_average: Number.isFinite(parsedRating) && parsedRating > 0 ? parsedRating : 0,
     genres: (meta.genres || []).map((g, i) => ({ id: i + 1, name: g })),
     credits: {
       cast: (meta.cast || []).slice(0, 4).map((name) => ({ name })),

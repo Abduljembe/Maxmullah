@@ -103,8 +103,8 @@ export const SearchDrawer: React.FC<SearchDrawerProps> = ({
       // Genre filter
       if (selectedGenre !== 'all' && !(item.genres || []).includes(selectedGenre)) return false;
 
-      // Min RT score
-      if (minRating > 0 && (item.rottenTomatoesScore || 0) < minRating) return false;
+      // Min rating score
+      if (minRating > 0 && (item.imdbScore || 0) < minRating) return false;
 
       // If no query, pass
       if (!q) return true;
@@ -143,7 +143,7 @@ export const SearchDrawer: React.FC<SearchDrawerProps> = ({
     liveResults.forEach((item) => {
       if (selectedType !== 'all' && item.type !== selectedType) return;
       if (selectedGenre !== 'all' && !(item.genres || []).includes(selectedGenre)) return;
-      if (minRating > 0 && (item.rottenTomatoesScore || 0) < minRating) return;
+      if (minRating > 0 && (item.imdbScore || 0) < minRating) return;
 
       // Don't add duplicate by title
       const alreadyHas = Array.from(map.values()).some(
@@ -268,18 +268,18 @@ export const SearchDrawer: React.FC<SearchDrawerProps> = ({
               ))}
             </select>
 
-            {/* Min RT Score */}
+            {/* Min Rating Filter */}
             <div className="flex items-center gap-2 bg-white/5 px-3 py-1.5 rounded-xl border border-white/10 text-slate-300">
-              <span className="text-slate-400">Min Score:</span>
+              <span className="text-slate-400">Min Rating:</span>
               <button
-                onClick={() => setMinRating(minRating === 90 ? 0 : 90)}
+                onClick={() => setMinRating(minRating === 8 ? 0 : 8)}
                 className={`px-2 py-0.5 rounded text-[11px] font-bold cursor-pointer transition-colors ${
-                  minRating === 90
-                    ? 'bg-emerald-600 text-white'
-                    : 'text-emerald-400 hover:bg-white/10'
+                  minRating === 8
+                    ? 'bg-amber-500 text-black'
+                    : 'text-amber-400 hover:bg-white/10'
                 }`}
               >
-                90%+ Only
+                8.0+ Only
               </button>
             </div>
           </div>
