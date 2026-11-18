@@ -573,9 +573,9 @@ async function startServer() {
   /**
    * Smart Per-Title Availability & ID Resolver:
    * 1. Checks saved custom/CDN direct stream library first.
-   * 2. Resolves missing IMDb ID via TMDB external_ids so IMDb-only mirrors work.
-   * 3. Probes VidLink, VixSrc (O(1) index), and PrimeSrc (live hosts) in parallel.
-   * 4. Returns `recommendedServer` + `directStreamUrl` so searched titles play reliably.
+   * 2. Resolves missing TMDB ID from IMDb ID (via VixSrc index, TMDB /find, or Cinemeta) & missing IMDb ID via TMDB external_ids.
+   * 3. Checks VixSrc (O(1) verified index), PrimeSrc (live hosts), and VidLink/VidFast in parallel.
+   * 4. Returns `recommendedServer`, `resolvedTmdbId`, `resolvedImdbId`, and `directStreamUrl` so searched titles play reliably.
    */
   app.get('/api/servers/sources', async (req, res) => {
     const rawTmdbId = parseInt(String(req.query.tmdbId || '0'), 10);
@@ -590,7 +590,35 @@ async function startServer() {
     }
 
     try {
+      const vixStore = await getVixSrcIndexStore(type);
       let tmdbId = rawTmdbId;
+
+      if (!tmdbId && initialImdbId.startsWith('tt')) {
+        const vixMatch = vixStore.data.find((entry) => entry.imdb_id === initialImdbId && entry.tmdb_id > 0);
+        if (vixMatch) {
+          tmdbId = vixMatch.tmdb_id;
+        }
+      }
+
+      if (!tmdbId && initialImdbId.startsWith('tt')) {
+        try {
+          const findRes = await fetch(
+            `https://api.themoviedb.org/3/find/${encodeURIComponent(initialImdbId)}?api_key=${DEFAULT_TMDB_KEY}&external_source=imdb_id`,
+            { signal: AbortSignal.timeout(4000) }
+          );
+          if (findRes.ok) {
+            const findData = (await findRes.json()) as {
+              movie_results?: Array<{ id: number }>;
+              tv_results?: Array<{ id: number }>;
+            };
+            const list = type === 'tv' ? findData.tv_results : findData.movie_results;
+            if (list && list[0]?.id > 0) {
+              tmdbId = list[0].id;
+            }
+          }
+        } catch {}
+      }
+
       if (!tmdbId && initialImdbId.startsWith('tt')) {
         const cm = await fetchCinemetaMeta(type, initialImdbId);
         if (cm?.moviedb_id && cm.moviedb_id > 0) {
@@ -609,7 +637,7 @@ async function startServer() {
           ? `https://vidlink.pro/tv/${targetId}/${season}/${episode}`
           : `https://vidlink.pro/movie/${targetId}`;
 
-      const [streamsStore, primeResult, vixStore, vidlinkOk, resolvedImdb] = await Promise.all([
+      const [streamsStore, primeResult, vidlinkOk, resolvedImdb] = await Promise.all([
         readStreamsStore(),
         fetch(primeUrl, {
           headers: {
@@ -624,10 +652,12 @@ async function startServer() {
         })
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null),
-        getVixSrcIndexStore(type),
         tmdbId > 0
           ? fetch(vidlinkUrl, {
-              headers: { 'User-Agent': 'Mozilla/5.0' },
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+              },
               signal: AbortSignal.timeout(4000),
             })
               .then((r) => r.status === 200)
@@ -662,10 +692,8 @@ async function startServer() {
         (tmdbId > 0 && vixStore.tmdbSet.has(tmdbId)) ||
         Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
 
-      let recommendedServer: 'vidlink' | 'vixsrc' | 'primesrc' | 'vidfast' = 'vidlink';
-      if (vidlinkOk) {
-        recommendedServer = 'vidlink';
-      } else if (vixsrcAvailable) {
+      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vixsrc';
+      if (vixsrcAvailable) {
         recommendedServer = 'vixsrc';
       } else if (primeSrcHosts.length > 0) {
         recommendedServer = 'primesrc';
@@ -678,6 +706,7 @@ async function startServer() {
         vidlinkAvailable: vidlinkOk,
         vixsrcAvailable,
         primeSrcHosts,
+        resolvedTmdbId: tmdbId > 0 ? tmdbId : undefined,
         resolvedImdbId: finalImdbId,
         recommendedServer,
         info: primeInfo,

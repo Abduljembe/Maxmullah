@@ -36,11 +36,11 @@ export interface VidukiServerDefinition {
 
 export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
   {
-    id: 'vidlink',
-    name: 'VidLink HD',
-    tag: 'Ad-Free · Fast',
-    badge: 'VidLink',
-    description: 'Clean ad-free HD & 4K player with instant autoplay and auto-resume.',
+    id: 'vixsrc',
+    name: 'VixSrc HD',
+    tag: 'Verified · 4K',
+    badge: 'VixSrc',
+    description: 'Ad-free 4K & HD multi-audio stream verified against 53,000+ titles.',
     adFree: true,
     latencyMs: 45,
   },
@@ -63,22 +63,22 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
     latencyMs: 65,
   },
   {
-    id: 'vixsrc',
-    name: 'VixSrc',
-    tag: 'Ad-Free · 4K',
-    badge: 'VixSrc',
-    description: 'Adaptive 4K & HD multi-audio stream with synchronized subtitles.',
-    adFree: true,
-    latencyMs: 75,
-  },
-  {
     id: 'primesrc',
     name: 'PrimeSrc Multi-Host',
     tag: 'Multi-Host',
     badge: 'PrimeSrc',
-    description: 'Aggregates Luluvdoo, Filemoon, Voe, Mixdrop, Dood, Streamtape & Vidmoly.',
+    description: 'Aggregates Filemoon, Voe, Luluvdoo, Streamtape, Mixdrop, Dood & Vidmoly.',
     adFree: true,
-    latencyMs: 100,
+    latencyMs: 85,
+  },
+  {
+    id: 'vidlink',
+    name: 'VidLink',
+    tag: 'Auto-Fallback',
+    badge: 'VidLink',
+    description: 'Fast HD player with automatic fallback mirror if unavailable.',
+    adFree: true,
+    latencyMs: 95,
   },
   {
     id: 'superembed',
@@ -126,11 +126,11 @@ export function isAdFreeServer(serverId: AnyServerId): boolean {
 
 export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
   const order: AnyServerId[] = [
-    'vidlink',
+    'vixsrc',
     'vidfast',
     'videasy',
-    'vixsrc',
     'primesrc',
+    'vidlink',
     'superembed',
     'vidsrc_sh',
     '2embed',
@@ -150,14 +150,13 @@ export interface VideoProviderConfig {
   customTemplate: string;
 }
 
-const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v7';
+const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v8';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
-  provider: 'vidlink',
-  vidukiServer: 'vidlink',
+  provider: 'vixsrc',
+  vidukiServer: 'vixsrc',
   accentColor: 'e50914',
-  customTemplate:
-    'https://vidlink.pro/movie/{id}?primaryColor=e50914&secondaryColor=170000&iconColor=e50914&autoplay=true&title=false&poster=true',
+  customTemplate: 'https://vixsrc.to/movie/{id}?primaryColor=e50914&secondaryColor=170000&autoplay=1',
 };
 
 export function getVideoProviderConfig(): VideoProviderConfig {
@@ -170,7 +169,7 @@ export function getVideoProviderConfig(): VideoProviderConfig {
       const parsed = JSON.parse(raw);
       const savedServer = VALID_SERVER_IDS.has(parsed.vidukiServer)
         ? (parsed.vidukiServer as AnyServerId)
-        : 'vidlink';
+        : 'vixsrc';
       return {
         provider: VALID_SERVER_IDS.has(parsed.provider) ? parsed.provider : savedServer,
         vidukiServer: savedServer,
@@ -246,15 +245,21 @@ export function generateStreamSource(
   const sNum = Math.max(1, season);
   const epNum = Math.max(1, episode);
 
-  const requestedServer = overrideServer ?? cfg.vidukiServer ?? 'vidlink';
-  const server: AnyServerId = VALID_SERVER_IDS.has(requestedServer) ? requestedServer : 'vidlink';
+  const requestedServer = overrideServer ?? cfg.vidukiServer ?? 'vixsrc';
+  const server: AnyServerId = VALID_SERVER_IDS.has(requestedServer) ? requestedServer : 'vixsrc';
 
-  // 1. VidLink Pro (Default: Cleanest, Fastest, Ad-Free Autoplay)
+  const vidfastFallbackUrl =
+    media.type === 'series'
+      ? `https://vidfast.pro/tv/${targetId}/${sNum}/${epNum}?autoPlay=true&theme=${color}&nextButton=true&title=false`
+      : `https://vidfast.pro/movie/${targetId}?autoPlay=true&theme=${color}&title=false`;
+
+  // 1. VidLink Pro (with built-in automatic fallback_url to VidFast so "We Couldn't Find This Content ." auto-recovers)
   if (server === 'vidlink') {
+    const encodedFallback = encodeURIComponent(vidfastFallbackUrl);
     const url =
       media.type === 'series'
-        ? `https://vidlink.pro/tv/${targetId}/${sNum}/${epNum}?primaryColor=${color}&secondaryColor=170000&iconColor=${color}&autoplay=true&title=false&poster=true&nextbutton=true`
-        : `https://vidlink.pro/movie/${targetId}?primaryColor=${color}&secondaryColor=170000&iconColor=${color}&autoplay=true&title=false&poster=true`;
+        ? `https://vidlink.pro/tv/${targetId}/${sNum}/${epNum}?primaryColor=${color}&secondaryColor=170000&iconColor=${color}&autoplay=true&title=false&poster=true&nextbutton=true&fallback_url=${encodedFallback}`
+        : `https://vidlink.pro/movie/${targetId}?primaryColor=${color}&secondaryColor=170000&iconColor=${color}&autoplay=true&title=false&poster=true&fallback_url=${encodedFallback}`;
     return {
       type: 'iframe',
       url,
@@ -400,6 +405,7 @@ export interface LiveServerSourcesResponse {
   vidlinkAvailable: boolean;
   vixsrcAvailable: boolean;
   primeSrcHosts: LivePrimeSrcHost[];
+  resolvedTmdbId?: number;
   resolvedImdbId?: string;
   recommendedServer?: AnyServerId;
 }
@@ -479,6 +485,7 @@ export async function fetchLiveServerSources(
         vidlinkAvailable: Boolean(data.vidlinkAvailable),
         vixsrcAvailable: Boolean(data.vixsrcAvailable),
         primeSrcHosts: Array.isArray(data.primeSrcHosts) ? data.primeSrcHosts : [],
+        resolvedTmdbId: typeof data.resolvedTmdbId === 'number' ? data.resolvedTmdbId : undefined,
         resolvedImdbId: data.resolvedImdbId,
         recommendedServer: data.recommendedServer,
       };

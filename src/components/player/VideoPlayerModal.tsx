@@ -81,9 +81,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     isOffline && hasPlayableDownloadedFile ? 'offline' : 'stream'
   );
 
-  // Inbuilt background server routing & silent failover (defaults to fastest ad-free VidLink player)
+  // Inbuilt background server routing & silent failover (defaults to verified VixSrc player)
   const [selectedServer, setSelectedServer] = useState<AnyServerId>(() => {
-    return getVideoProviderConfig().vidukiServer || 'vidlink';
+    return getVideoProviderConfig().vidukiServer || 'vixsrc';
   });
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
@@ -107,7 +107,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const controlsTimeoutRef = useRef<number | null>(null);
   const userManuallyPickedServerRef = useRef(false);
 
-  // Probe live direct stream registry + VidLink, VixSrc, PrimeSrc availability & resolve IMDb ID
+  // Probe live direct stream registry + VixSrc, PrimeSrc, VidFast availability & resolve TMDB/IMDb IDs
   useEffect(() => {
     let cancelled = false;
     fetchLiveServerSources(media, currentSeason, currentEpisode).then((res) => {
@@ -123,10 +123,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         return;
       }
 
-      // Otherwise auto-route to a verified playable server if current server lacks this title
+      // Auto-route to a verified playable server if current server lacks this title
       if (!userManuallyPickedServerRef.current && res.recommendedServer) {
         const currentIsVerified =
-          (selectedServer === 'vidlink' && res.vidlinkAvailable) ||
           (selectedServer === 'vixsrc' && res.vixsrcAvailable) ||
           (selectedServer === 'primesrc' && res.primeSrcHosts.length > 0);
 
@@ -163,10 +162,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     (e) => e.episodeNumber === currentEpisode
   );
 
-  // Merge resolved IMDb ID for searched titles so IMDb-only backup mirrors always match
+  // Merge resolved TMDB & IMDb IDs for searched titles so all embed mirrors match accurately
   const resolvedMedia: MediaItem =
-    liveSources?.resolvedImdbId && !media.imdbId
-      ? { ...media, imdbId: liveSources.resolvedImdbId }
+    liveSources?.resolvedTmdbId || liveSources?.resolvedImdbId
+      ? {
+          ...media,
+          tmdbId: liveSources.resolvedTmdbId || media.tmdbId,
+          imdbId: liveSources.resolvedImdbId || media.imdbId,
+        }
       : media;
 
   // Generate stream source cleanly under the hood
@@ -704,12 +707,34 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </div>
           )}
 
-          {/* Clean Source Picker */}
+          {/* Quick 1-Click Ad-Free Server Switcher */}
+          <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl bg-white/10 border border-white/10 text-xs">
+            {(['vixsrc', 'vidfast', 'videasy', 'primesrc'] as AnyServerId[]).map((srvId) => {
+              const def = VIDUKI_SERVERS.find((s) => s.id === srvId);
+              if (!def) return null;
+              const isActive = selectedServer === srvId && playerMode === 'stream';
+              return (
+                <button
+                  key={srvId}
+                  onClick={() => handleSelectServer(srvId)}
+                  className={`px-2.5 py-1 rounded-lg font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    isActive
+                      ? 'bg-rose-600 text-white'
+                      : 'text-slate-300 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  {def.badge}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* All Servers & Direct Stream Picker */}
           <div className="relative">
             <button
               onClick={() => setShowSourceMenu(!showSourceMenu)}
-              className="px-3 py-1.5 rounded-xl font-semibold transition-colors cursor-pointer text-xs flex items-center gap-1.5 bg-white/10 hover:bg-white/20 text-white border border-white/10"
-              title="Change video source"
+              className="px-3 py-1.5 rounded-xl font-semibold transition-colors cursor-pointer text-xs flex items-center gap-1.5 bg-white/10 hover:bg-white/20 text-white border border-white/10 whitespace-nowrap shrink-0"
+              title="All streaming servers"
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{activeStreamSource.providerName}</span>
