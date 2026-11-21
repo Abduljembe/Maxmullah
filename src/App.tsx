@@ -35,19 +35,17 @@ import { VibeMatcherModal } from './components/modals/VibeMatcherModal';
 import { SeriesEpisodePickerModal } from './components/modals/SeriesEpisodePickerModal';
 import { SearchDrawer } from './components/search/SearchDrawer';
 import { DownloadsView } from './components/views/DownloadsView';
-import { MoviesView } from './components/views/MoviesView';
-import { SeriesView } from './components/views/SeriesView';
-import { TrendingAndNewSection } from './components/views/TrendingAndNewSection';
+import { MoviesView, MoviesViewFeed } from './components/views/MoviesView';
+import { SeriesView, SeriesViewFeed } from './components/views/SeriesView';
+import { TrendingAndNewSection, SeeAllTarget } from './components/views/TrendingAndNewSection';
+import { NetworksView } from './components/views/NetworksView';
 import { TMDBSettingsModal } from './components/modals/TMDBSettingsModal';
 import {
   fetchLiveTrending,
   fetchServerMovies,
   fetchServerIndexedCatalog,
 } from './services/tmdbService';
-import {
-  getPersonalizedRecommendations,
-  getBecauseYouWatched,
-} from './utils/recommendationEngine';
+import { getBecauseYouWatched } from './utils/recommendationEngine';
 import { installAdShield } from './utils/adBlocker';
 
 function MainAppContent() {
@@ -69,6 +67,24 @@ function MainAppContent() {
     isOffline ? 'downloads' : 'home'
   );
   const [selectedPlatform, setSelectedPlatform] = useState<StreamingPlatform | 'ALL'>('ALL');
+  const [moviesPreset, setMoviesPreset] = useState<{
+    feed: MoviesViewFeed;
+    genreId: number;
+    vixLang: string;
+  }>({
+    feed: 'popular',
+    genreId: 0,
+    vixLang: 'all',
+  });
+  const [seriesPreset, setSeriesPreset] = useState<{
+    feed: SeriesViewFeed;
+    genreId: number;
+    vixLang: string;
+  }>({
+    feed: 'all_feeds',
+    genreId: 0,
+    vixLang: 'all',
+  });
 
   // Modals state
   const [selectedMedia, setSelectedMedia] = useState<MediaItem | null>(null);
@@ -192,11 +208,6 @@ function MainAppContent() {
     loadLiveTMDB();
   }, [isOffline]);
 
-  // Personalized recommendations for active user
-  const personalizedMatches = useMemo(() => {
-    return getPersonalizedRecommendations(catalog, currentProfile, activeMood);
-  }, [catalog, currentProfile, activeMood]);
-
   const becauseWatched = useMemo(() => {
     return getBecauseYouWatched(catalog, currentProfile);
   }, [catalog, currentProfile]);
@@ -229,23 +240,6 @@ function MainAppContent() {
     return items.length > 0 ? items : catalog.slice(0, 8);
   }, [catalog]);
 
-  // Top critically acclaimed (RT 95%+)
-  const criticallyAcclaimed = useMemo(() => {
-    return catalog.filter((item) => item.rottenTomatoesScore >= 94);
-  }, [catalog]);
-
-  // Sci-Fi, Adventure & Mind-Bending epics
-  const sciFiAndEpics = useMemo(() => {
-    return catalog.filter((item) =>
-      item.genres.some((g) => ['Sci-Fi', 'Adventure', 'Mystery', 'Animation'].includes(g))
-    );
-  }, [catalog]);
-
-  // Filtered views for Movies and Series tabs
-  const moviesOnly = useMemo(() => {
-    return platformFilteredCatalog.filter((m) => m.type === 'movie');
-  }, [platformFilteredCatalog]);
-
   const seriesOnly = useMemo(() => {
     return platformFilteredCatalog.filter((m) => m.type === 'series');
   }, [platformFilteredCatalog]);
@@ -261,7 +255,11 @@ function MainAppContent() {
       {/* Top Bar Contract (Wordmark - 4/5 Links - Primary Actions) */}
       <TopBar
         currentTab={currentTab}
-        onSelectTab={setCurrentTab}
+        onSelectTab={(tab) => {
+          if (tab === 'movies') setMoviesPreset({ feed: 'popular', genreId: 0, vixLang: 'all' });
+          if (tab === 'series') setSeriesPreset({ feed: 'all_feeds', genreId: 0, vixLang: 'all' });
+          setCurrentTab(tab);
+        }}
         onOpenProfile={() => setShowProfileModal(true)}
         onOpenVibeMatcher={() => setShowVibeMatcher(true)}
         onToggleSearch={() => setShowSearch(true)}
@@ -301,70 +299,35 @@ function MainAppContent() {
               onSelectPlatform={setSelectedPlatform}
             />
 
-            {/* Trending (Today | This Week) & New Movies & Releases */}
+            {/* Trending (Today | This Week) & Endless Category Cinema Rows */}
             <TrendingAndNewSection
               selectedPlatform={selectedPlatform}
               fallbackCatalog={platformFilteredCatalog}
               onSelect={setSelectedMedia}
               onPlay={(m) => handlePlayMedia(m)}
               onDownload={(m) => setDownloadTarget({ media: m })}
-              onViewAllMovies={() => setCurrentTab('movies')}
-              onViewAllSeries={() => setCurrentTab('series')}
+              onSeeAllCategory={(target: SeeAllTarget) => {
+                if (target.type === 'series') {
+                  setSeriesPreset({
+                    feed: (target.feed as SeriesViewFeed) || 'all_feeds',
+                    genreId: target.genreId || 0,
+                    vixLang: target.vixLang || 'all',
+                  });
+                  setCurrentTab('series');
+                } else {
+                  setMoviesPreset({
+                    feed: (target.feed as MoviesViewFeed) || 'popular',
+                    genreId: target.genreId || 0,
+                    vixLang: target.vixLang || 'all',
+                  });
+                  setCurrentTab('movies');
+                }
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
               onItemsLoaded={mergeCatalogItems}
             />
 
-            {/* TV Series Row */}
-            <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4 pt-2">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl sm:text-2xl font-black text-white font-display">
-                  Popular Series
-                </h2>
-                <button
-                  onClick={() => setCurrentTab('series')}
-                  className="text-xs text-rose-400 hover:text-rose-300 font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <span>View All</span>
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Top TV Series Grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
-                {seriesOnly.slice(0, 8).map((series) => (
-                  <MediaCard
-                    key={series.id}
-                    media={series}
-                    onSelect={setSelectedMedia}
-                    onPlay={(m) => handlePlayMedia(m)}
-                    onDownload={(m) => setDownloadTarget({ media: m })}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Section 1: Recommended For You */}
-            <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl sm:text-2xl font-black text-white font-display">
-                  Recommended for {currentProfile.name}
-                </h2>
-              </div>
-
-              {/* Grid of Top 8 Personalized Matches */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
-                {personalizedMatches.slice(0, 8).map(({ media }) => (
-                  <MediaCard
-                    key={media.id}
-                    media={media}
-                    onSelect={setSelectedMedia}
-                    onPlay={(m) => handlePlayMedia(m)}
-                    onDownload={(m) => setDownloadTarget({ media: m })}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Section 2: Because You Watched */}
+            {/* Section: Because You Watched (when watch history is available) */}
             {becauseWatched && becauseWatched.recommendations.length > 0 && (
               <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4">
                 <div className="flex items-center justify-between">
@@ -380,55 +343,13 @@ function MainAppContent() {
                       key={item.id}
                       media={item}
                       onSelect={setSelectedMedia}
-                      onPlay={(m) => handlePlayMedia(item)}
+                      onPlay={(m) => handlePlayMedia(m)}
                       onDownload={(m) => setDownloadTarget({ media: m })}
                     />
                   ))}
                 </div>
               </div>
             )}
-
-            {/* Section 3: Critically Acclaimed */}
-            <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl sm:text-2xl font-black text-white font-display">
-                  Critically Acclaimed
-                </h2>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
-                {criticallyAcclaimed.map((item) => (
-                  <MediaCard
-                    key={item.id}
-                    media={item}
-                    onSelect={setSelectedMedia}
-                    onPlay={(m) => handlePlayMedia(m)}
-                    onDownload={(m) => setDownloadTarget({ media: m })}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Section 5: Sci-Fi & Action */}
-            <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl sm:text-2xl font-black text-white font-display">
-                  Sci-Fi &amp; High-Concept Cinema
-                </h2>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5">
-                {sciFiAndEpics.slice(0, 8).map((item) => (
-                  <MediaCard
-                    key={item.id}
-                    media={item}
-                    onSelect={setSelectedMedia}
-                    onPlay={(m) => handlePlayMedia(m)}
-                    onDownload={(m) => setDownloadTarget({ media: m })}
-                  />
-                ))}
-              </div>
-            </div>
 
             {/* Section 6: Browse by Streaming Network Showcase */}
             <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4 pt-4">
@@ -478,55 +399,42 @@ function MainAppContent() {
           </div>
         )}
 
-        {/* MOVIES ONLY TAB (Loads live movies from servers on display) */}
+        {/* MOVIES ONLY TAB (Loads endless pages from servers on scroll) */}
         {currentTab === 'movies' && (
           <MoviesView
             onSelectMovie={setSelectedMedia}
             onPlayMovie={(m) => handlePlayMedia(m)}
             onDownloadMovie={(m) => setDownloadTarget({ media: m })}
             initialCatalogMovies={catalog.filter((m) => m.type === 'movie')}
+            initialFeed={moviesPreset.feed}
+            initialGenreId={moviesPreset.genreId}
+            initialVixLang={moviesPreset.vixLang}
           />
         )}
 
-        {/* SERIES ONLY TAB (Fetches live series from servers) */}
+        {/* SERIES ONLY TAB (Fetches endless pages from servers on scroll) */}
         {currentTab === 'series' && (
           <SeriesView
             onSelectSeries={setSelectedMedia}
             onPlaySeries={(m) => handlePlayMedia(m)}
             onDownloadSeries={(m) => setDownloadTarget({ media: m })}
             initialCatalogSeries={seriesOnly}
+            initialFeed={seriesPreset.feed}
+            initialGenreId={seriesPreset.genreId}
+            initialVixLang={seriesPreset.vixLang}
           />
         )}
 
         {/* ALL PLATFORMS EXPLORATION TAB */}
         {currentTab === 'networks' && (
-          <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto py-8 space-y-8">
-            <div>
-              <h1 className="text-3xl font-black text-white font-display">
-                Browse by Network
-              </h1>
-              <p className="text-xs text-slate-400 mt-1">
-                Explore movies and series across your favorite networks.
-              </p>
-            </div>
-
-            <PlatformFilterBar
-              selectedPlatform={selectedPlatform}
-              onSelectPlatform={setSelectedPlatform}
-            />
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-4 sm:gap-5 pt-4">
-              {platformFilteredCatalog.map((item) => (
-                <MediaCard
-                  key={item.id}
-                  media={item}
-                  onSelect={setSelectedMedia}
-                  onPlay={(m) => handlePlayMedia(m)}
-                  onDownload={(m) => setDownloadTarget({ media: m })}
-                />
-              ))}
-            </div>
-          </div>
+          <NetworksView
+            selectedPlatform={selectedPlatform}
+            onSelectPlatform={setSelectedPlatform}
+            fallbackCatalog={platformFilteredCatalog}
+            onSelect={setSelectedMedia}
+            onPlay={(m) => handlePlayMedia(m)}
+            onDownload={(m) => setDownloadTarget({ media: m })}
+          />
         )}
       </main>
 

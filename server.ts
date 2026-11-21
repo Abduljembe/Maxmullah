@@ -42,10 +42,7 @@ interface SavedStreamEntry {
   updatedAt: string;
 }
 
-const vixsrcIndexCache: Record<'movie' | 'tv', VixSrcIndexStore | null> = {
-  movie: null,
-  tv: null,
-};
+const vixsrcIndexCache = new Map<string, VixSrcIndexStore>();
 const tmdbMetadataCache = new Map<string, { data: Record<string, unknown>; fetchedAt: number }>();
 const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
@@ -80,14 +77,19 @@ function makeStreamKey(type: 'movie' | 'tv', id: string, season = 1, episode = 1
   return type === 'tv' ? `tv:${id}:s${season}e${episode}` : `movie:${id}`;
 }
 
-async function getVixSrcIndexStore(type: 'movie' | 'tv'): Promise<VixSrcIndexStore> {
-  const cached = vixsrcIndexCache[type];
+async function getVixSrcIndexStore(type: 'movie' | 'tv', lang?: string): Promise<VixSrcIndexStore> {
+  const cleanLang = typeof lang === 'string' && /^[a-z]{2,5}$/i.test(lang.trim()) ? lang.trim().toLowerCase() : '';
+  const cacheKey = cleanLang ? `${type}:${cleanLang}` : type;
+  const cached = vixsrcIndexCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < INDEX_CACHE_TTL_MS) {
     return cached;
   }
 
   try {
-    const res = await fetch(`https://vixsrc.to/api/list/${type}`, {
+    const apiUrl = cleanLang
+      ? `https://vixsrc.to/api/list/${type}?lang=${encodeURIComponent(cleanLang)}`
+      : `https://vixsrc.to/api/list/${type}`;
+    const res = await fetch(apiUrl, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -109,12 +111,12 @@ async function getVixSrcIndexStore(type: 'movie' | 'tv'): Promise<VixSrcIndexSto
           imdbSet,
           fetchedAt: Date.now(),
         };
-        vixsrcIndexCache[type] = store;
+        vixsrcIndexCache.set(cacheKey, store);
         return store;
       }
     }
   } catch (err) {
-    console.warn(`[servers/catalog] Failed to fetch vixsrc ${type} list:`, err);
+    console.warn(`[servers/catalog] Failed to fetch vixsrc ${cacheKey} list:`, err);
   }
 
   return (
@@ -521,11 +523,12 @@ async function startServer() {
    */
   app.get('/api/servers/catalog', async (req, res) => {
     const rawType = req.query.type === 'tv' ? 'tv' : 'movie';
+    const lang = typeof req.query.lang === 'string' && req.query.lang !== 'all' ? req.query.lang.trim() : '';
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const pageSize = 20;
 
     try {
-      const store = await getVixSrcIndexStore(rawType);
+      const store = await getVixSrcIndexStore(rawType, lang || undefined);
       const index = store.data;
       if (index.length === 0) {
         res.json({ items: [], page, totalPages: 1, totalResults: 0 });
@@ -638,7 +641,12 @@ async function startServer() {
           ? `https://vidlink.pro/tv/${targetId}/${season}/${episode}`
           : `https://vidlink.pro/movie/${targetId}`;
 
-      const [streamsStore, primeResult, vidlinkOk, resolvedImdb] = await Promise.all([
+      const vixEmbedUrl =
+        type === 'tv'
+          ? `https://vixsrc.to/tv/${targetId}/${season}/${episode}`
+          : `https://vixsrc.to/movie/${targetId}`;
+
+      const [streamsStore, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb] = await Promise.all([
         readStreamsStore(),
         fetch(primeUrl, {
           headers: {
@@ -660,6 +668,17 @@ async function startServer() {
                   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
               },
               signal: AbortSignal.timeout(4000),
+            })
+              .then((r) => r.status === 200)
+              .catch(() => false)
+          : Promise.resolve(false),
+        tmdbId > 0
+          ? fetch(vixEmbedUrl, {
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+              },
+              signal: AbortSignal.timeout(3000),
             })
               .then((r) => r.status === 200)
               .catch(() => false)
@@ -689,15 +708,18 @@ async function startServer() {
         streamsStore[makeStreamKey(type, targetId, season, episode)] ||
         (finalImdbId ? streamsStore[makeStreamKey(type, finalImdbId, season, episode)] : undefined);
 
-      const vixsrcAvailable =
+      const inVixCatalog =
         (tmdbId > 0 && vixStore.tmdbSet.has(tmdbId)) ||
         Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
+      const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
-      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vixsrc';
+      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vidfast';
       if (vixsrcAvailable) {
         recommendedServer = 'vixsrc';
       } else if (primeSrcHosts.length > 0) {
         recommendedServer = 'primesrc';
+      } else if (vidlinkOk) {
+        recommendedServer = 'vidlink';
       } else {
         recommendedServer = 'vidfast';
       }

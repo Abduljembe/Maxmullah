@@ -34,6 +34,9 @@ import {
   fetchLiveServerSources,
   saveCustomDirectStream,
   LiveServerSourcesResponse,
+  VixSrcPlayerEvent,
+  getSavedResumeSeconds,
+  saveResumeSeconds,
 } from '../../services/videoProviderService';
 import { prewarmStreamUrl } from '../../utils/adBlocker';
 
@@ -81,9 +84,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     isOffline && hasPlayableDownloadedFile ? 'offline' : 'stream'
   );
 
-  // Inbuilt background server routing & silent failover (defaults to verified VixSrc player)
+  // Inbuilt background server routing & silent failover (defaults to fast HTTP-200 VidFast player)
   const [selectedServer, setSelectedServer] = useState<AnyServerId>(() => {
-    return getVideoProviderConfig().vidukiServer || 'vixsrc';
+    return getVideoProviderConfig().vidukiServer || 'vidfast';
   });
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
@@ -104,8 +107,26 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [showControls, setShowControls] = useState(true);
   const [showEpisodeDrawer, setShowEpisodeDrawer] = useState(false);
 
+  // VixSrc customization state (primaryColor, secondaryColor, autoplay, startAt, lang)
+  const [providerCfg, setProviderCfg] = useState(() => getVideoProviderConfig());
+  const [startAtSeconds, setStartAtSeconds] = useState<number>(() =>
+    getSavedResumeSeconds(media.id, seasonNumber || 1, episodeNumber || 1)
+  );
+  const [vixLiveTime, setVixLiveTime] = useState<number>(0);
+  const [vixDuration, setVixDuration] = useState<number>(0);
+
   const controlsTimeoutRef = useRef<number | null>(null);
   const userManuallyPickedServerRef = useRef(false);
+  const lastSavedProgressSecRef = useRef<number>(0);
+
+  // Sync saved startAt resume position when changing movie or episode
+  useEffect(() => {
+    const saved = getSavedResumeSeconds(media.id, currentSeason, currentEpisode);
+    setStartAtSeconds(saved);
+    setVixLiveTime(saved);
+    setVixDuration(0);
+    lastSavedProgressSecRef.current = 0;
+  }, [media.id, currentSeason, currentEpisode]);
 
   // Probe live direct stream registry + VixSrc, PrimeSrc, VidFast availability & resolve TMDB/IMDb IDs
   useEffect(() => {
@@ -123,13 +144,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         return;
       }
 
-      // Auto-route to a verified playable server if current server lacks this title
+      // Auto-route away from blocked or unavailable servers (e.g., Cloudflare-blocked vixsrc)
       if (!userManuallyPickedServerRef.current && res.recommendedServer) {
-        const currentIsVerified =
-          (selectedServer === 'vixsrc' && res.vixsrcAvailable) ||
-          (selectedServer === 'primesrc' && res.primeSrcHosts.length > 0);
+        const currentUnavailable =
+          (selectedServer === 'vixsrc' && !res.vixsrcAvailable) ||
+          (selectedServer === 'vidlink' && !res.vidlinkAvailable) ||
+          (selectedServer === 'primesrc' && res.primeSrcHosts.length === 0);
 
-        if (!currentIsVerified && res.recommendedServer !== selectedServer) {
+        if (currentUnavailable && res.recommendedServer !== selectedServer) {
           setSelectedServer(res.recommendedServer);
           setIframeLoaded(false);
           setIframeKey((k) => k + 1);
@@ -172,12 +194,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         }
       : media;
 
-  // Generate stream source cleanly under the hood
+  // Generate stream source cleanly under the hood (including VixSrc customization params & resume startAt)
   const activeStreamSource = generateStreamSource(
     resolvedMedia,
     currentSeason,
     currentEpisode,
-    selectedServer
+    selectedServer,
+    {
+      primaryColor: providerCfg.accentColor,
+      secondaryColor: providerCfg.secondaryColor,
+      autoplay: providerCfg.autoplay,
+      lang: providerCfg.preferredLang,
+      startAt: startAtSeconds,
+    }
   );
 
   useEffect(() => {
@@ -230,6 +259,71 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     media.type === 'series' &&
     (currentSeason < allSeasons.length ||
       currentEpisode < (activeSeason?.episodes.length || 10));
+
+  // VixSrc Player Event Tracking via postMessage (play, pause, seeked, ended, timeupdate)
+  useEffect(() => {
+    const handlePlayerMessage = (event: MessageEvent) => {
+      if (event.origin && !event.origin.includes('vixsrc') && !event.origin.includes('vidlink') && !event.origin.includes('vidfast')) {
+        return;
+      }
+      const payload = event.data as Partial<VixSrcPlayerEvent> | null;
+      if (!payload || payload.type !== 'PLAYER_EVENT' || !payload.data) return;
+
+      const { event: playerEvent, currentTime: evTime, duration: evDur } = payload.data;
+      const curSec = typeof evTime === 'number' && Number.isFinite(evTime) ? evTime : 0;
+      const totalSec = typeof evDur === 'number' && Number.isFinite(evDur) ? evDur : 0;
+
+      if (curSec > 0) setVixLiveTime(curSec);
+      if (totalSec > 0) setVixDuration(totalSec);
+
+      if (playerEvent === 'play') {
+        setIsPlaying(true);
+        setIframeLoaded(true);
+      } else if (playerEvent === 'pause' || playerEvent === 'seeked') {
+        if (playerEvent === 'pause') setIsPlaying(false);
+        if (curSec > 5) {
+          saveResumeSeconds(media.id, curSec, currentSeason, currentEpisode);
+          if (totalSec > 0) {
+            const pct = Math.min(99, Math.round((curSec / totalSec) * 100));
+            updateWatchProgress(media.id, pct, currentSeason, currentEpisode);
+          }
+        }
+      } else if (playerEvent === 'timeupdate') {
+        setIsPlaying(true);
+        if (curSec > 5 && Math.abs(curSec - lastSavedProgressSecRef.current) >= 5) {
+          lastSavedProgressSecRef.current = curSec;
+          saveResumeSeconds(media.id, curSec, currentSeason, currentEpisode);
+          if (totalSec > 0) {
+            const pct = Math.min(99, Math.round((curSec / totalSec) * 100));
+            updateWatchProgress(media.id, pct, currentSeason, currentEpisode);
+          }
+        }
+      } else if (playerEvent === 'ended') {
+        setIsPlaying(false);
+        saveResumeSeconds(media.id, 0, currentSeason, currentEpisode);
+        updateWatchProgress(media.id, 100, currentSeason, currentEpisode);
+        if (media.type === 'series' && hasNextEpisode) {
+          handleNavigateEpisode(1);
+        }
+      }
+    };
+
+    window.addEventListener('message', handlePlayerMessage);
+    return () => window.removeEventListener('message', handlePlayerMessage);
+  }, [media.id, media.type, currentSeason, currentEpisode, hasNextEpisode, updateWatchProgress]);
+
+  const updateCustomization = (patch: Partial<typeof providerCfg>, reloadFrame = true) => {
+    const next = { ...providerCfg, ...patch };
+    setProviderCfg(next);
+    saveVideoProviderConfig(next);
+    if (reloadFrame) {
+      if (vixLiveTime > 5) {
+        setStartAtSeconds(Math.floor(vixLiveTime));
+      }
+      setIframeLoaded(false);
+      setIframeKey((k) => k + 1);
+    }
+  };
 
   const handleSelectServer = (serverId: AnyServerId) => {
     userManuallyPickedServerRef.current = true;
@@ -672,8 +766,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             <h2 className="text-sm sm:text-base md:text-lg font-bold text-white font-display truncate max-w-xs sm:max-w-md md:max-w-xl">
               {displayTitle}
             </h2>
-            <span className="text-[11px] text-slate-400 font-medium">
+            <span className="text-[11px] text-slate-400 font-medium tabular-nums">
               {media.rating} · {media.year}
+              {vixDuration > 0 && ` · ${formatTime(vixLiveTime)} / ${formatTime(vixDuration)}`}
             </span>
           </div>
         </div>
@@ -709,7 +804,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
           {/* Quick 1-Click Ad-Free Server Switcher */}
           <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl bg-white/10 border border-white/10 text-xs">
-            {(['vixsrc', 'vidfast', 'videasy', 'primesrc'] as AnyServerId[]).map((srvId) => {
+            {(['vidfast', 'primesrc', 'vidlink', 'vixsrc'] as AnyServerId[]).map((srvId) => {
               const def = VIDUKI_SERVERS.find((s) => s.id === srvId);
               if (!def) return null;
               const isActive = selectedServer === srvId && playerMode === 'stream';
@@ -810,6 +905,73 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       </button>
                     );
                   })}
+                </div>
+
+                {/* VixSrc Player Customization (lang, autoplay, primaryColor/secondaryColor) */}
+                <div className="pt-2 border-t border-white/10 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-300">
+                      Audio Language (lang)
+                    </span>
+                    <select
+                      value={providerCfg.preferredLang}
+                      onChange={(e) => updateCustomization({ preferredLang: e.target.value })}
+                      className="bg-black/60 border border-white/15 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-rose-500 cursor-pointer"
+                    >
+                      <option value="">Auto / Default</option>
+                      <option value="en">English (en)</option>
+                      <option value="it">Italian (it)</option>
+                      <option value="es">Spanish (es)</option>
+                      <option value="fr">French (fr)</option>
+                      <option value="de">German (de)</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-300">
+                      Autoplay &amp; Theme Color
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { label: 'Crimson', primary: 'B20710', secondary: '170000' },
+                        { label: 'Rose', primary: 'E11D48', secondary: '19060D' },
+                        { label: 'Blue', primary: '2563EB', secondary: '0A1128' },
+                      ].map((preset) => {
+                        const activeColor =
+                          providerCfg.accentColor.toUpperCase() === preset.primary.toUpperCase();
+                        return (
+                          <button
+                            key={preset.primary}
+                            type="button"
+                            title={preset.label}
+                            onClick={() =>
+                              updateCustomization({
+                                accentColor: preset.primary,
+                                secondaryColor: preset.secondary,
+                              })
+                            }
+                            className={`w-5 h-5 rounded-full border transition-transform cursor-pointer ${
+                              activeColor
+                                ? 'border-white scale-110'
+                                : 'border-white/20 opacity-75 hover:opacity-100'
+                            }`}
+                            style={{ backgroundColor: `#${preset.primary}` }}
+                          />
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={() => updateCustomization({ autoplay: !providerCfg.autoplay })}
+                        className={`ml-1 px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
+                          providerCfg.autoplay
+                            ? 'bg-rose-600/30 border-rose-500 text-rose-200'
+                            : 'bg-white/5 border-white/15 text-slate-400'
+                        }`}
+                      >
+                        {providerCfg.autoplay ? 'Autoplay On' : 'Autoplay Off'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Quiet Custom Stream Input inside Source Drawer */}

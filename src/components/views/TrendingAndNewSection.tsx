@@ -1,11 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Loader2, Plus } from 'lucide-react';
 import { MediaItem, StreamingPlatform } from '../../types';
 import {
-  fetchLiveTrending,
-  fetchNewReleasesFeed,
+  FetchServerMoviesResult,
+  MovieFeedType,
+  TMDB_WATCH_PROVIDER_IDS,
+  fetchLiveTrendingPaged,
+  fetchServerIndexedCatalog,
+  fetchServerMovies,
 } from '../../services/tmdbService';
 import { MediaCard } from '../cards/MediaCard';
+
+export interface SeeAllTarget {
+  type: 'movie' | 'series';
+  feed?: MovieFeedType | 'all_feeds' | 'vixsrc' | 'popular' | 'trending' | 'top_rated' | 'now_playing';
+  genreId?: number;
+  vixLang?: string;
+}
 
 interface TrendingAndNewSectionProps {
   selectedPlatform: StreamingPlatform | 'ALL';
@@ -13,45 +24,204 @@ interface TrendingAndNewSectionProps {
   onSelect: (media: MediaItem) => void;
   onPlay: (media: MediaItem) => void;
   onDownload: (media: MediaItem) => void;
-  onViewAllMovies: () => void;
-  onViewAllSeries: () => void;
+  onSeeAllCategory: (target: SeeAllTarget) => void;
   onItemsLoaded?: (items: MediaItem[]) => void;
 }
 
-interface CinemaRowProps {
+function deduplicateItems(list: MediaItem[]): MediaItem[] {
+  const seen = new Set<string>();
+  const out: MediaItem[] = [];
+  for (const item of list) {
+    const key = item.tmdbId ? `${item.type}-${item.tmdbId}` : item.id;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+interface InfiniteCinemaRowProps {
   title: string;
-  items: MediaItem[];
-  isLoading: boolean;
+  fetchPage: (page: number) => Promise<FetchServerMoviesResult>;
+  resetKey: string;
+  fallbackItems: MediaItem[];
+  eager?: boolean;
   onSelect: (media: MediaItem) => void;
   onPlay: (media: MediaItem) => void;
   onDownload: (media: MediaItem) => void;
   onSeeAll: () => void;
+  onItemsLoaded?: (items: MediaItem[]) => void;
   headerExtra?: React.ReactNode;
 }
 
-const CinemaRow: React.FC<CinemaRowProps> = ({
+const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
   title,
-  items,
-  isLoading,
+  fetchPage,
+  resetKey,
+  fallbackItems,
+  eager = false,
   onSelect,
   onPlay,
   onDownload,
   onSeeAll,
+  onItemsLoaded,
   headerExtra,
 }) => {
+  const sectionRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
+  const rightSentinelRef = useRef<HTMLButtonElement>(null);
+
+  const [hasActivated, setHasActivated] = useState(eager);
+  const [items, setItems] = useState<MediaItem[]>([]);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+
+  const pageRef = useRef(1);
+  const totalPagesRef = useRef(500);
+  const loadingRef = useRef(false);
+  const activeKeyRef = useRef(resetKey);
+
+  useEffect(() => {
+    if (eager || hasActivated) return;
+    const node = sectionRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setHasActivated(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setHasActivated(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '800px 0px' }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [eager, hasActivated]);
+
+  useEffect(() => {
+    if (!hasActivated) return;
+    let cancelled = false;
+    activeKeyRef.current = resetKey;
+    pageRef.current = 1;
+    totalPagesRef.current = 500;
+    loadingRef.current = true;
+    setIsInitialLoading(true);
+    setIsLoadingMore(false);
+    setHasMore(true);
+
+    // Fetch pages 1 & 2 on initial load so each category immediately has a rich horizontal strip
+    Promise.all([fetchPage(1), fetchPage(2)])
+      .then(([res1, res2]) => {
+        if (cancelled || activeKeyRef.current !== resetKey) return;
+        const combined = deduplicateItems([...(res1.items || []), ...(res2.items || [])]);
+        const maxTotalPages = Math.max(1, res1.totalPages || 1, res2.totalPages || 1);
+        const loadedPage = res2.items.length > 0 ? 2 : 1;
+
+        setItems(combined);
+        pageRef.current = loadedPage;
+        totalPagesRef.current = maxTotalPages;
+        setHasMore(loadedPage < maxTotalPages);
+
+        if (combined.length > 0) {
+          onItemsLoaded?.(combined);
+        }
+      })
+      .finally(() => {
+        if (!cancelled && activeKeyRef.current === resetKey) {
+          loadingRef.current = false;
+          setIsInitialLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasActivated, resetKey, fetchPage]);
+
+  const loadNextPage = useCallback(async () => {
+    if (!hasActivated || loadingRef.current) return;
+    if (pageRef.current >= totalPagesRef.current) {
+      setHasMore(false);
+      return;
+    }
+
+    const currentKey = resetKey;
+    const nextPage = pageRef.current + 1;
+    loadingRef.current = true;
+    setIsLoadingMore(true);
+
+    try {
+      const res = await fetchPage(nextPage);
+      if (activeKeyRef.current !== currentKey) return;
+      pageRef.current = nextPage;
+      totalPagesRef.current = Math.max(pageRef.current, res.totalPages || totalPagesRef.current);
+      setHasMore(pageRef.current < totalPagesRef.current);
+
+      if (res.items.length > 0) {
+        setItems((prev) => deduplicateItems([...prev, ...res.items]));
+        onItemsLoaded?.(res.items);
+      }
+    } finally {
+      if (activeKeyRef.current === currentKey) {
+        loadingRef.current = false;
+        setIsLoadingMore(false);
+      }
+    }
+  }, [hasActivated, resetKey, fetchPage, onItemsLoaded]);
+
+  useEffect(() => {
+    const rail = railRef.current;
+    const sentinel = rightSentinelRef.current;
+    if (!rail || !sentinel || !hasActivated || isInitialLoading || !hasMore) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          loadNextPage();
+        }
+      },
+      {
+        root: rail,
+        rootMargin: '0px 700px 0px 0px',
+        threshold: 0.01,
+      }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasActivated, isInitialLoading, hasMore, items.length, loadNextPage]);
 
   const scrollRail = (direction: 'left' | 'right') => {
     if (!railRef.current) return;
-    const distance = Math.max(360, railRef.current.clientWidth * 0.8);
-    railRef.current.scrollBy({
+    const rail = railRef.current;
+    const distance = Math.max(360, rail.clientWidth * 0.8);
+    rail.scrollBy({
       left: direction === 'left' ? -distance : distance,
       behavior: 'smooth',
     });
+
+    if (direction === 'right') {
+      const remainingRight = rail.scrollWidth - (rail.scrollLeft + rail.clientWidth);
+      if (remainingRight < distance * 2.5) {
+        loadNextPage();
+      }
+    }
   };
 
+  const renderedItems = items.length > 0 ? items : fallbackItems;
+
   return (
-    <section className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-3.5">
+    <section
+      ref={sectionRef}
+      className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-3.5"
+    >
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 sm:gap-4 min-w-0">
           <h2 className="text-lg sm:text-xl font-bold text-white font-display truncate">
@@ -87,7 +257,7 @@ const CinemaRow: React.FC<CinemaRowProps> = ({
         </div>
       </div>
 
-      {isLoading && items.length === 0 ? (
+      {isInitialLoading && items.length === 0 ? (
         <div className="flex gap-3.5 sm:gap-4 overflow-hidden">
           {Array.from({ length: 10 }).map((_, idx) => (
             <div
@@ -103,11 +273,18 @@ const CinemaRow: React.FC<CinemaRowProps> = ({
       ) : (
         <div
           ref={railRef}
-          className="flex gap-3.5 sm:gap-4 overflow-x-auto pb-2 scroll-smooth no-scrollbar"
+          onScroll={() => {
+            const rail = railRef.current;
+            if (!rail) return;
+            if (rail.scrollWidth - (rail.scrollLeft + rail.clientWidth) < 850) {
+              loadNextPage();
+            }
+          }}
+          className="flex gap-3.5 sm:gap-4 overflow-x-auto pb-2 scroll-smooth no-scrollbar items-start"
         >
-          {items.map((item) => (
+          {renderedItems.map((item) => (
             <div
-              key={item.id}
+              key={`${resetKey}-${item.id}`}
               className="w-[140px] sm:w-[155px] md:w-[168px] shrink-0"
             >
               <MediaCard
@@ -118,6 +295,28 @@ const CinemaRow: React.FC<CinemaRowProps> = ({
               />
             </div>
           ))}
+
+          {hasMore && (
+            <button
+              ref={rightSentinelRef}
+              type="button"
+              onClick={loadNextPage}
+              disabled={isLoadingMore}
+              className="w-[105px] sm:w-[120px] aspect-[2/3] shrink-0 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 flex flex-col items-center justify-center gap-2 text-slate-300 transition-colors cursor-pointer"
+            >
+              {isLoadingMore ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin text-rose-500" />
+                  <span className="text-[11px] font-medium">Loading...</span>
+                </>
+              ) : (
+                <>
+                  <Plus className="w-5 h-5 text-rose-500" />
+                  <span className="text-[11px] font-semibold">Load more</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
       )}
     </section>
@@ -130,71 +329,141 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
   onSelect,
   onPlay,
   onDownload,
-  onViewAllMovies,
-  onViewAllSeries,
+  onSeeAllCategory,
   onItemsLoaded,
 }) => {
   const [trendingWindow, setTrendingWindow] = useState<'day' | 'week'>('day');
-  const [trendingMovies, setTrendingMovies] = useState<MediaItem[]>([]);
-  const [trendingSeries, setTrendingSeries] = useState<MediaItem[]>([]);
-  const [popularMovies, setPopularMovies] = useState<MediaItem[]>([]);
-  const [newMovies, setNewMovies] = useState<MediaItem[]>([]);
-  const [loadingTrending, setLoadingTrending] = useState(true);
-  const [loadingRows, setLoadingRows] = useState(true);
+  const [vixLang, setVixLang] = useState<'all' | 'it'>('all');
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingTrending(true);
-    Promise.all([
-      fetchLiveTrending('movie', 1, trendingWindow),
-      fetchLiveTrending('tv', 1, trendingWindow),
-    ])
-      .then(([moviesRes, seriesRes]) => {
-        if (cancelled) return;
-        if (moviesRes.length > 0) setTrendingMovies(moviesRes);
-        if (seriesRes.length > 0) setTrendingSeries(seriesRes);
-        onItemsLoaded?.([...moviesRes, ...seriesRes]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingTrending(false);
-      });
+  const watchProviderId =
+    selectedPlatform !== 'ALL' ? TMDB_WATCH_PROVIDER_IDS[selectedPlatform] : undefined;
 
-    return () => {
-      cancelled = true;
-    };
-  }, [trendingWindow]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingRows(true);
-    Promise.all([
-      fetchNewReleasesFeed('popular', 1),
-      fetchNewReleasesFeed('now_playing', 1),
-    ])
-      .then(([popularRes, nowPlayingRes]) => {
-        if (cancelled) return;
-        if (popularRes.length > 0) setPopularMovies(popularRes);
-        if (nowPlayingRes.length > 0) setNewMovies(nowPlayingRes);
-        onItemsLoaded?.([...popularRes, ...nowPlayingRes]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingRows(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const applyPlatformFilter = (items: MediaItem[], fallback: MediaItem[]) => {
-    const base = items.length > 0 ? items : fallback;
-    if (selectedPlatform === 'ALL') return base;
-    const filtered = base.filter((m) => m.platforms.includes(selectedPlatform));
-    return filtered.length > 0 ? filtered : base;
+  const filterPlatformClient = (list: MediaItem[]) => {
+    if (selectedPlatform === 'ALL') return list;
+    const filtered = list.filter((m) => m.platforms.includes(selectedPlatform));
+    return filtered.length > 0 ? filtered : list;
   };
 
-  const movieFallbacks = fallbackCatalog.filter((m) => m.type === 'movie');
-  const seriesFallbacks = fallbackCatalog.filter((m) => m.type === 'series');
+  const movieFallbacks = filterPlatformClient(fallbackCatalog.filter((m) => m.type === 'movie'));
+  const seriesFallbacks = filterPlatformClient(fallbackCatalog.filter((m) => m.type === 'series'));
+
+  const fetchTrendingMovies = useCallback(
+    (page: number) =>
+      watchProviderId
+        ? fetchServerMovies({ feed: 'popular', releasedOnly: true, page, watchProviderId })
+        : fetchLiveTrendingPaged('movie', page, trendingWindow),
+    [watchProviderId, trendingWindow]
+  );
+
+  const fetchTrendingSeries = useCallback(
+    (page: number) => fetchLiveTrendingPaged('tv', page, trendingWindow),
+    [trendingWindow]
+  );
+
+  const fetchVixSrcMovies = useCallback(
+    (page: number) =>
+      fetchServerIndexedCatalog('movie', page, vixLang === 'all' ? undefined : vixLang),
+    [vixLang]
+  );
+
+  const fetchVixSrcSeries = useCallback(
+    (page: number) =>
+      fetchServerIndexedCatalog('tv', page, vixLang === 'all' ? undefined : vixLang),
+    [vixLang]
+  );
+
+  const fetchNewReleasedMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'now_playing',
+        releasedOnly: true,
+        minVotes: 25,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
+
+  const fetchPopularMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'popular',
+        releasedOnly: true,
+        minVotes: 250,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
+
+  const fetchTopRatedMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({ feed: 'top_rated', minVotes: 300, page, watchProviderId }),
+    [watchProviderId]
+  );
+
+  const fetchActionMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'popular',
+        genreId: 28,
+        withoutGenres: '16',
+        minVotes: 400,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
+
+  const fetchSciFiMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'popular',
+        genreId: 878,
+        withoutGenres: '28,16',
+        minVotes: 250,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
+
+  const fetchComedyMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'popular',
+        genreId: 35,
+        withoutGenres: '28,27,16',
+        minVotes: 300,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
+
+  const fetchHorrorMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'popular',
+        genreId: 27,
+        minVotes: 200,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
+
+  const fetchAnimationMovies = useCallback(
+    (page: number) =>
+      fetchServerMovies({
+        feed: 'popular',
+        genreId: 16,
+        minVotes: 250,
+        page,
+        watchProviderId,
+      }),
+    [watchProviderId]
+  );
 
   const windowToggle = (
     <div
@@ -231,47 +500,191 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
     </div>
   );
 
+  const vixLangToggle = (
+    <div
+      role="tablist"
+      aria-label="VixSrc language filter"
+      className="inline-flex items-center p-0.5 rounded-lg bg-white/8 border border-white/10 text-[11px]"
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={vixLang === 'all'}
+        onClick={() => setVixLang('all')}
+        className={`px-2.5 py-0.5 rounded-md font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+          vixLang === 'all'
+            ? 'bg-rose-600 text-white'
+            : 'text-slate-300 hover:text-white'
+        }`}
+      >
+        All
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={vixLang === 'it'}
+        onClick={() => setVixLang('it')}
+        className={`px-2.5 py-0.5 rounded-md font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+          vixLang === 'it'
+            ? 'bg-rose-600 text-white'
+            : 'text-slate-300 hover:text-white'
+        }`}
+      >
+        Italian (it)
+      </button>
+    </div>
+  );
+
   return (
     <div className="space-y-9 pt-2">
-      <CinemaRow
+      <InfiniteCinemaRow
         title="Trending movies"
-        items={applyPlatformFilter(trendingMovies, movieFallbacks)}
-        isLoading={loadingTrending}
+        fetchPage={fetchTrendingMovies}
+        resetKey={`trending-movies-${trendingWindow}-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        eager
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
-        onSeeAll={onViewAllMovies}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', feed: 'trending' })}
+        onItemsLoaded={onItemsLoaded}
         headerExtra={windowToggle}
       />
 
-      <CinemaRow
+      <InfiniteCinemaRow
         title="Trending series"
-        items={applyPlatformFilter(trendingSeries, seriesFallbacks)}
-        isLoading={loadingTrending}
+        fetchPage={fetchTrendingSeries}
+        resetKey={`trending-series-${trendingWindow}`}
+        fallbackItems={seriesFallbacks}
+        eager
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
-        onSeeAll={onViewAllSeries}
+        onSeeAll={() => onSeeAllCategory({ type: 'series', feed: 'trending' })}
+        onItemsLoaded={onItemsLoaded}
       />
 
-      <CinemaRow
+      <InfiniteCinemaRow
+        title="VixSrc Movies"
+        fetchPage={fetchVixSrcMovies}
+        resetKey={`vixsrc-movies-${vixLang}`}
+        fallbackItems={movieFallbacks}
+        eager
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', feed: 'vixsrc', vixLang })}
+        onItemsLoaded={onItemsLoaded}
+        headerExtra={vixLangToggle}
+      />
+
+      <InfiniteCinemaRow
         title="New movies"
-        items={applyPlatformFilter(newMovies, movieFallbacks)}
-        isLoading={loadingRows}
+        fetchPage={fetchNewReleasedMovies}
+        resetKey={`new-released-movies-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        eager
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
-        onSeeAll={onViewAllMovies}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', feed: 'now_playing' })}
+        onItemsLoaded={onItemsLoaded}
       />
 
-      <CinemaRow
+      <InfiniteCinemaRow
         title="Popular movies"
-        items={applyPlatformFilter(popularMovies, movieFallbacks)}
-        isLoading={loadingRows}
+        fetchPage={fetchPopularMovies}
+        resetKey={`popular-released-movies-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
-        onSeeAll={onViewAllMovies}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', feed: 'popular' })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="Top rated movies"
+        fetchPage={fetchTopRatedMovies}
+        resetKey={`top-rated-movies-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', feed: 'top_rated' })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="Action movies"
+        fetchPage={fetchActionMovies}
+        resetKey={`genre-28-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', genreId: 28 })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="Sci-Fi movies"
+        fetchPage={fetchSciFiMovies}
+        resetKey={`genre-878-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', genreId: 878 })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="Comedy movies"
+        fetchPage={fetchComedyMovies}
+        resetKey={`genre-35-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', genreId: 35 })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="Horror movies"
+        fetchPage={fetchHorrorMovies}
+        resetKey={`genre-27-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', genreId: 27 })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="Animation movies"
+        fetchPage={fetchAnimationMovies}
+        resetKey={`genre-16-${selectedPlatform}`}
+        fallbackItems={movieFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'movie', genreId: 16 })}
+        onItemsLoaded={onItemsLoaded}
+      />
+
+      <InfiniteCinemaRow
+        title="VixSrc Series"
+        fetchPage={fetchVixSrcSeries}
+        resetKey={`vixsrc-series-${vixLang}`}
+        fallbackItems={seriesFallbacks}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        onDownload={onDownload}
+        onSeeAll={() => onSeeAllCategory({ type: 'series', feed: 'vixsrc', vixLang })}
+        onItemsLoaded={onItemsLoaded}
       />
     </div>
   );

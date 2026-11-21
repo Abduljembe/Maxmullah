@@ -354,6 +354,19 @@ function normalizeTVMazeShow(show: TVMazeShow): MediaItem {
   };
 }
 
+export const TMDB_WATCH_PROVIDER_IDS: Partial<Record<StreamingPlatform, number>> = {
+  Netflix: 8,
+  Max: 1899,
+  'Disney+': 337,
+  'Apple TV+': 350,
+  'Prime Video': 9,
+  Hulu: 15,
+  'Paramount+': 531,
+  Peacock: 386,
+  'Criterion Channel': 258,
+  Crunchyroll: 283,
+};
+
 export const MOVIE_GENRES_LIST = [
   { id: 0, name: 'All Genres' },
   { id: 28, name: 'Action' },
@@ -384,10 +397,24 @@ export async function fetchServerMovies(options: {
   feed?: MovieFeedType;
   page?: number;
   genreId?: number;
+  withoutGenres?: string;
+  minVotes?: number;
+  releasedOnly?: boolean;
+  watchProviderId?: number;
   query?: string;
   sortBy?: string;
 }): Promise<FetchServerMoviesResult> {
-  const { feed = 'popular', page = 1, genreId, query, sortBy = 'popularity.desc' } = options;
+  const {
+    feed = 'popular',
+    page = 1,
+    genreId,
+    withoutGenres,
+    minVotes,
+    releasedOnly = false,
+    watchProviderId,
+    query,
+    sortBy,
+  } = options;
 
   try {
     let data: { results?: RawTMDBItem[]; total_pages?: number; total_results?: number } | null = null;
@@ -397,13 +424,45 @@ export async function fetchServerMovies(options: {
         page,
         include_adult: false,
       });
-    } else if (genreId && genreId > 0) {
-      data = await tmdbFetchJson('discover/movie', {
-        with_genres: genreId,
-        sort_by: sortBy,
+    } else if (
+      (genreId && genreId > 0) ||
+      (watchProviderId && watchProviderId > 0) ||
+      releasedOnly
+    ) {
+      const resolvedSort =
+        sortBy ||
+        (feed === 'top_rated'
+          ? 'vote_average.desc'
+          : feed === 'now_playing'
+          ? 'primary_release_date.desc'
+          : 'popularity.desc');
+
+      const discoverParams: Record<string, string | number | boolean> = {
+        sort_by: resolvedSort,
         page,
         include_adult: false,
-      });
+      };
+      if (genreId && genreId > 0) {
+        discoverParams.with_genres = genreId;
+      }
+      if (withoutGenres) {
+        discoverParams.without_genres = withoutGenres;
+      }
+      if (watchProviderId && watchProviderId > 0) {
+        discoverParams.with_watch_providers = watchProviderId;
+        discoverParams.watch_region = 'US';
+      }
+      if (typeof minVotes === 'number' && minVotes > 0) {
+        discoverParams['vote_count.gte'] = minVotes;
+      } else if (feed === 'top_rated') {
+        discoverParams['vote_count.gte'] = 200;
+      } else if (genreId && genreId > 0) {
+        discoverParams['vote_count.gte'] = 100;
+      }
+      if (releasedOnly || feed === 'now_playing' || (genreId && genreId > 0)) {
+        discoverParams['primary_release_date.lte'] = new Date().toISOString().slice(0, 10);
+      }
+      data = await tmdbFetchJson('discover/movie', discoverParams);
     } else {
       const pathMap: Record<MovieFeedType, string> = {
         trending: 'trending/movie/week',
@@ -482,10 +541,18 @@ export async function fetchServerSeries(options: {
   feed?: SeriesFeedType;
   page?: number;
   genreId?: number;
+  watchProviderId?: number;
   query?: string;
   sortBy?: string;
 }): Promise<FetchServerMoviesResult> {
-  const { feed = 'popular', page = 1, genreId, query, sortBy = 'popularity.desc' } = options;
+  const {
+    feed = 'popular',
+    page = 1,
+    genreId,
+    watchProviderId,
+    query,
+    sortBy,
+  } = options;
 
   try {
     let data: { results?: RawTMDBItem[]; total_pages?: number; total_results?: number } | null = null;
@@ -495,13 +562,25 @@ export async function fetchServerSeries(options: {
         page,
         include_adult: false,
       });
-    } else if (genreId && genreId > 0) {
-      data = await tmdbFetchJson('discover/tv', {
-        with_genres: genreId,
-        sort_by: sortBy,
+    } else if ((genreId && genreId > 0) || (watchProviderId && watchProviderId > 0)) {
+      const resolvedSort =
+        sortBy || (feed === 'top_rated' ? 'vote_average.desc' : 'popularity.desc');
+      const discoverParams: Record<string, string | number | boolean> = {
+        sort_by: resolvedSort,
         page,
         include_adult: false,
-      });
+      };
+      if (genreId && genreId > 0) {
+        discoverParams.with_genres = genreId;
+      }
+      if (watchProviderId && watchProviderId > 0) {
+        discoverParams.with_watch_providers = watchProviderId;
+        discoverParams.watch_region = 'US';
+      }
+      if (feed === 'top_rated') {
+        discoverParams['vote_count.gte'] = 100;
+      }
+      data = await tmdbFetchJson('discover/tv', discoverParams);
     } else {
       const pathMap: Record<SeriesFeedType, string> = {
         trending: 'trending/tv/week',
@@ -562,10 +641,15 @@ export async function fetchAllServerSeriesMultiFeed(page = 1): Promise<MediaItem
  */
 export async function fetchServerIndexedCatalog(
   type: 'movie' | 'tv' = 'movie',
-  page = 1
+  page = 1,
+  lang?: string
 ): Promise<FetchServerMoviesResult> {
   try {
-    const res = await fetch(`/api/servers/catalog?type=${type}&page=${page}`);
+    const qs = new URLSearchParams({ type, page: String(page) });
+    if (lang && lang !== 'all') {
+      qs.set('lang', lang);
+    }
+    const res = await fetch(`/api/servers/catalog?${qs.toString()}`);
     if (res.ok) {
       const data = (await res.json()) as {
         items?: RawTMDBItem[];
@@ -590,61 +674,95 @@ export async function fetchServerIndexedCatalog(
   return { items: [], page, totalPages: 1, totalResults: 0 };
 }
 
+export async function fetchLiveTrendingPaged(
+  type: 'all' | 'movie' | 'tv' = 'all',
+  page = 1,
+  timeWindow: 'day' | 'week' = 'week'
+): Promise<FetchServerMoviesResult> {
+  try {
+    const data = await tmdbFetchJson<{
+      results?: RawTMDBItem[];
+      total_pages?: number;
+      total_results?: number;
+    }>(`trending/${type}/${timeWindow}`, { page });
+
+    if (data?.results) {
+      const items = data.results
+        .filter((r) => {
+          if (type === 'all') {
+            return (
+              (r.media_type === 'movie' || r.media_type === 'tv' || !r.media_type) &&
+              Boolean(r.poster_path || r.backdrop_path)
+            );
+          }
+          return Boolean(r.poster_path || r.backdrop_path);
+        })
+        .map((item) =>
+          type === 'all'
+            ? normalizeTMDBItem(item)
+            : normalizeTMDBItem(item, type === 'movie' ? 'movie' : 'series')
+        );
+
+      return {
+        items,
+        page,
+        totalPages: Math.min(data.total_pages || 1, 500),
+        totalResults: data.total_results || items.length,
+      };
+    }
+  } catch {}
+
+  if (page === 1) {
+    try {
+      const res = await fetch(`${TVMAZE_BASE_URL}/shows?page=0`);
+      if (res.ok) {
+        const shows: TVMazeShow[] = await res.json();
+        const items = shows.slice(0, 18).map(normalizeTVMazeShow);
+        return { items, page: 1, totalPages: 1, totalResults: items.length };
+      }
+    } catch (err) {
+      console.warn('TVMaze live catalog fetch fallback', err);
+    }
+  }
+
+  return { items: [], page, totalPages: 1, totalResults: 0 };
+}
+
 // Safe live fetch: tries backend TMDB proxy first, then falls back to free TVMaze
 export async function fetchLiveTrending(
   type: 'all' | 'movie' | 'tv' = 'all',
   page = 1,
   timeWindow: 'day' | 'week' = 'week'
 ): Promise<MediaItem[]> {
-  try {
-    if (type === 'all') {
-      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(`trending/all/${timeWindow}`, { page });
-      if (data?.results) {
-        const items = data.results
-          .filter(
-            (r) =>
-              (r.media_type === 'movie' || r.media_type === 'tv' || !r.media_type) &&
-              Boolean(r.poster_path || r.backdrop_path)
-          )
-          .map((r) => normalizeTMDBItem(r));
-        if (items.length > 0) return items;
-      }
-    } else {
-      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(`trending/${type}/${timeWindow}`, { page });
-      if (data?.results) {
-        return data.results
-          .filter((r) => Boolean(r.poster_path || r.backdrop_path))
-          .map((item) => normalizeTMDBItem(item, type === 'movie' ? 'movie' : 'series'));
-      }
-    }
-  } catch {}
-
-  // Graceful Zero-Key Live API Fallback via TVMaze
-  try {
-    const res = await fetch(`${TVMAZE_BASE_URL}/shows?page=0`);
-    if (res.ok) {
-      const shows: TVMazeShow[] = await res.json();
-      return shows.slice(0, 18).map(normalizeTVMazeShow);
-    }
-  } catch (err) {
-    console.warn('TVMaze live catalog fetch fallback', err);
-  }
-
-  return [];
+  const res = await fetchLiveTrendingPaged(type, page, timeWindow);
+  return res.items;
 }
 
 export type NewReleaseFeedTab = 'now_playing' | 'upcoming' | 'popular' | 'on_tv';
 
-export async function fetchNewReleasesFeed(tab: NewReleaseFeedTab, page = 1): Promise<MediaItem[]> {
+export async function fetchNewReleasesFeedPaged(
+  tab: NewReleaseFeedTab,
+  page = 1
+): Promise<FetchServerMoviesResult> {
   try {
     if (tab === 'on_tv') {
-      const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>('tv/on_the_air', { page });
+      const data = await tmdbFetchJson<{
+        results?: RawTMDBItem[];
+        total_pages?: number;
+        total_results?: number;
+      }>('tv/on_the_air', { page });
       if (data?.results) {
-        return data.results
+        const items = data.results
           .filter((raw) => Boolean(raw.name && (raw.poster_path || raw.backdrop_path)))
           .map((raw) => normalizeTMDBItem(raw, 'series'));
+        return {
+          items,
+          page,
+          totalPages: Math.min(data.total_pages || 1, 500),
+          totalResults: data.total_results || items.length,
+        };
       }
-      return [];
+      return { items: [], page, totalPages: 1, totalResults: 0 };
     }
 
     const endpointMap: Record<Exclude<NewReleaseFeedTab, 'on_tv'>, string> = {
@@ -652,16 +770,31 @@ export async function fetchNewReleasesFeed(tab: NewReleaseFeedTab, page = 1): Pr
       upcoming: 'movie/upcoming',
       popular: 'movie/popular',
     };
-    const data = await tmdbFetchJson<{ results?: RawTMDBItem[] }>(endpointMap[tab], { page });
+    const data = await tmdbFetchJson<{
+      results?: RawTMDBItem[];
+      total_pages?: number;
+      total_results?: number;
+    }>(endpointMap[tab], { page });
     if (data?.results) {
-      return data.results
+      const items = data.results
         .filter((raw) => Boolean(raw.title && (raw.poster_path || raw.backdrop_path)))
         .map((raw) => normalizeTMDBItem(raw, 'movie'));
+      return {
+        items,
+        page,
+        totalPages: Math.min(data.total_pages || 1, 500),
+        totalResults: data.total_results || items.length,
+      };
     }
   } catch (err) {
-    console.warn('fetchNewReleasesFeed error:', err);
+    console.warn('fetchNewReleasesFeedPaged error:', err);
   }
-  return [];
+  return { items: [], page, totalPages: 1, totalResults: 0 };
+}
+
+export async function fetchNewReleasesFeed(tab: NewReleaseFeedTab, page = 1): Promise<MediaItem[]> {
+  const res = await fetchNewReleasesFeedPaged(tab, page);
+  return res.items;
 }
 
 // Live search: prefers reliable server-side /api/search proxy, then direct TMDB, then TVMaze

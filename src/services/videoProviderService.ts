@@ -36,31 +36,13 @@ export interface VidukiServerDefinition {
 
 export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
   {
-    id: 'vixsrc',
-    name: 'VixSrc HD',
-    tag: 'Verified · 4K',
-    badge: 'VixSrc',
-    description: 'Ad-free 4K & HD multi-audio stream verified against 53,000+ titles.',
-    adFree: true,
-    latencyMs: 45,
-  },
-  {
     id: 'vidfast',
     name: 'VidFast',
     tag: 'Ad-Free · Turbo',
     badge: 'VidFast',
     description: 'Zero popups with adaptive HLS streaming and auto-next episode.',
     adFree: true,
-    latencyMs: 55,
-  },
-  {
-    id: 'videasy',
-    name: 'Videasy',
-    tag: 'Ad-Free · Smooth',
-    badge: 'Videasy',
-    description: 'Smooth low-buffer stream with multi-language subtitles.',
-    adFree: true,
-    latencyMs: 65,
+    latencyMs: 45,
   },
   {
     id: 'primesrc',
@@ -69,7 +51,7 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
     badge: 'PrimeSrc',
     description: 'Aggregates Filemoon, Voe, Luluvdoo, Streamtape, Mixdrop, Dood & Vidmoly.',
     adFree: true,
-    latencyMs: 85,
+    latencyMs: 55,
   },
   {
     id: 'vidlink',
@@ -78,7 +60,25 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
     badge: 'VidLink',
     description: 'Fast HD player with automatic fallback mirror if unavailable.',
     adFree: true,
-    latencyMs: 95,
+    latencyMs: 65,
+  },
+  {
+    id: 'videasy',
+    name: 'Videasy',
+    tag: 'Ad-Free · Smooth',
+    badge: 'Videasy',
+    description: 'Smooth low-buffer stream with multi-language subtitles.',
+    adFree: true,
+    latencyMs: 75,
+  },
+  {
+    id: 'vixsrc',
+    name: 'VixSrc HD',
+    tag: '4K · Multi-Audio',
+    badge: 'VixSrc',
+    description: '4K & HD multi-audio stream (may require direct region access if Cloudflare protected).',
+    adFree: true,
+    latencyMs: 90,
   },
   {
     id: 'superembed',
@@ -126,11 +126,11 @@ export function isAdFreeServer(serverId: AnyServerId): boolean {
 
 export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
   const order: AnyServerId[] = [
-    'vixsrc',
     'vidfast',
-    'videasy',
     'primesrc',
     'vidlink',
+    'videasy',
+    'vixsrc',
     'superembed',
     'vidsrc_sh',
     '2embed',
@@ -146,18 +146,41 @@ export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
 export interface VideoProviderConfig {
   provider: VideoStreamProvider;
   vidukiServer: AnyServerId;
-  accentColor: string; // hex color without # (default: e50914)
+  accentColor: string; // hex color without # (e.g. B20710)
+  secondaryColor: string; // hex color without # (default: 170000)
+  autoplay: boolean;
+  preferredLang: string; // e.g. '' (auto) | 'en' | 'it' | 'es' | 'fr' | 'de'
   customTemplate: string;
 }
 
-const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v8';
+export interface VixSrcPlayerEvent {
+  type: 'PLAYER_EVENT';
+  data: {
+    event: 'play' | 'pause' | 'seeked' | 'ended' | 'timeupdate';
+    currentTime: number;
+    duration: number;
+    video_id: number;
+  };
+}
+
+const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v10';
+const STORAGE_KEY_RESUME_PREFIX = 'mullahmax_resume_sec_';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
-  provider: 'vixsrc',
-  vidukiServer: 'vixsrc',
-  accentColor: 'e50914',
-  customTemplate: 'https://vixsrc.to/movie/{id}?primaryColor=e50914&secondaryColor=170000&autoplay=1',
+  provider: 'vidfast',
+  vidukiServer: 'vidfast',
+  accentColor: 'B20710',
+  secondaryColor: '170000',
+  autoplay: true,
+  preferredLang: '',
+  customTemplate:
+    'https://vixsrc.to/movie/{id}?primaryColor=B20710&secondaryColor=170000&autoplay=true',
 };
+
+function sanitizeHexColor(raw: string | undefined, fallback: string): string {
+  const cleaned = (raw || '').replace(/#/g, '').trim();
+  return /^[0-9a-fA-F]{3,8}$/.test(cleaned) ? cleaned : fallback;
+}
 
 export function getVideoProviderConfig(): VideoProviderConfig {
   if (typeof window === 'undefined') {
@@ -169,11 +192,14 @@ export function getVideoProviderConfig(): VideoProviderConfig {
       const parsed = JSON.parse(raw);
       const savedServer = VALID_SERVER_IDS.has(parsed.vidukiServer)
         ? (parsed.vidukiServer as AnyServerId)
-        : 'vixsrc';
+        : 'vidfast';
       return {
         provider: VALID_SERVER_IDS.has(parsed.provider) ? parsed.provider : savedServer,
         vidukiServer: savedServer,
-        accentColor: (parsed.accentColor || 'e50914').replace('#', ''),
+        accentColor: sanitizeHexColor(parsed.accentColor, DEFAULT_CONFIG.accentColor),
+        secondaryColor: sanitizeHexColor(parsed.secondaryColor, DEFAULT_CONFIG.secondaryColor),
+        autoplay: typeof parsed.autoplay === 'boolean' ? parsed.autoplay : DEFAULT_CONFIG.autoplay,
+        preferredLang: typeof parsed.preferredLang === 'string' ? parsed.preferredLang : '',
         customTemplate: parsed.customTemplate || DEFAULT_CONFIG.customTemplate,
       };
     }
@@ -183,13 +209,46 @@ export function getVideoProviderConfig(): VideoProviderConfig {
 
 export function saveVideoProviderConfig(config: VideoProviderConfig) {
   try {
-    const validServer = VALID_SERVER_IDS.has(config.vidukiServer) ? config.vidukiServer : 'vidlink';
+    const validServer = VALID_SERVER_IDS.has(config.vidukiServer) ? config.vidukiServer : 'vidfast';
     const cleaned: VideoProviderConfig = {
       ...config,
       vidukiServer: validServer,
-      accentColor: (config.accentColor || 'e50914').replace('#', ''),
+      accentColor: sanitizeHexColor(config.accentColor, DEFAULT_CONFIG.accentColor),
+      secondaryColor: sanitizeHexColor(config.secondaryColor, DEFAULT_CONFIG.secondaryColor),
+      autoplay: Boolean(config.autoplay),
+      preferredLang: (config.preferredLang || '').trim(),
     };
     localStorage.setItem(STORAGE_KEY_PROVIDER, JSON.stringify(cleaned));
+  } catch {}
+}
+
+export function getSavedResumeSeconds(mediaId: string, season = 1, episode = 1): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const key = `${STORAGE_KEY_RESUME_PREFIX}${mediaId}_s${season}e${episode}`;
+    const raw = localStorage.getItem(key);
+    const secs = raw ? Math.floor(Number(raw)) : 0;
+    return Number.isFinite(secs) && secs > 5 ? secs : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function saveResumeSeconds(
+  mediaId: string,
+  seconds: number,
+  season = 1,
+  episode = 1
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const key = `${STORAGE_KEY_RESUME_PREFIX}${mediaId}_s${season}e${episode}`;
+    const cleanSecs = Math.max(0, Math.floor(seconds));
+    if (cleanSecs > 0) {
+      localStorage.setItem(key, String(cleanSecs));
+    } else {
+      localStorage.removeItem(key);
+    }
   } catch {}
 }
 
@@ -228,20 +287,66 @@ export interface StreamSourceResult {
   targetId: string;
 }
 
+export interface StreamCustomizationOptions {
+  primaryColor?: string;
+  secondaryColor?: string;
+  autoplay?: boolean;
+  startAt?: number;
+  lang?: string;
+}
+
+export function buildVixSrcEmbedUrl(
+  type: 'movie' | 'series',
+  id: string,
+  season = 1,
+  episode = 1,
+  opts: StreamCustomizationOptions = {}
+): string {
+  const cfg = getVideoProviderConfig();
+  const primaryColor = sanitizeHexColor(opts.primaryColor ?? cfg.accentColor, 'B20710');
+  const secondaryColor = sanitizeHexColor(opts.secondaryColor ?? cfg.secondaryColor, '170000');
+  const autoplay = opts.autoplay ?? cfg.autoplay;
+  const lang = (opts.lang ?? cfg.preferredLang ?? '').trim();
+  const startAt = typeof opts.startAt === 'number' && opts.startAt > 5 ? Math.floor(opts.startAt) : 0;
+
+  const basePath =
+    type === 'series'
+      ? `https://vixsrc.to/tv/${id}/${Math.max(1, season)}/${Math.max(1, episode)}`
+      : `https://vixsrc.to/movie/${id}`;
+
+  const params = new URLSearchParams();
+  params.set('primaryColor', primaryColor);
+  params.set('secondaryColor', secondaryColor);
+  params.set('autoplay', String(autoplay));
+  if (startAt > 0) {
+    params.set('startAt', String(startAt));
+  }
+  if (lang) {
+    params.set('lang', lang);
+  }
+
+  return `${basePath}?${params.toString()}`;
+}
+
 /**
  * Constructs the stream URL for any selected movie or series, defaulting to
- * fast, ad-free autoplay players (VidLink -> VidFast -> Videasy -> VixSrc -> PrimeSrc).
+ * VixSrc with full customization parameters (primaryColor, secondaryColor, autoplay, startAt, lang).
  */
 export function generateStreamSource(
   media: MediaItem,
   season = 1,
   episode = 1,
-  overrideServer?: AnyServerId
+  overrideServer?: AnyServerId,
+  customization?: StreamCustomizationOptions
 ): StreamSourceResult {
   const cfg = getVideoProviderConfig();
   const targetId = resolveTargetIdentifier(media);
   const imdbFallback = media.imdbId || (targetId.startsWith('tt') ? targetId : 'tt15239678');
-  const color = (cfg.accentColor || 'e50914').replace('#', '');
+  const color = sanitizeHexColor(customization?.primaryColor ?? cfg.accentColor, 'B20710');
+  const secondaryColor = sanitizeHexColor(
+    customization?.secondaryColor ?? cfg.secondaryColor,
+    '170000'
+  );
   const sNum = Math.max(1, season);
   const epNum = Math.max(1, episode);
 
@@ -253,13 +358,13 @@ export function generateStreamSource(
       ? `https://vidfast.pro/tv/${targetId}/${sNum}/${epNum}?autoPlay=true&theme=${color}&nextButton=true&title=false`
       : `https://vidfast.pro/movie/${targetId}?autoPlay=true&theme=${color}&title=false`;
 
-  // 1. VidLink Pro (with built-in automatic fallback_url to VidFast so "We Couldn't Find This Content ." auto-recovers)
+  // 1. VidLink Pro
   if (server === 'vidlink') {
     const encodedFallback = encodeURIComponent(vidfastFallbackUrl);
     const url =
       media.type === 'series'
-        ? `https://vidlink.pro/tv/${targetId}/${sNum}/${epNum}?primaryColor=${color}&secondaryColor=170000&iconColor=${color}&autoplay=true&title=false&poster=true&nextbutton=true&fallback_url=${encodedFallback}`
-        : `https://vidlink.pro/movie/${targetId}?primaryColor=${color}&secondaryColor=170000&iconColor=${color}&autoplay=true&title=false&poster=true&fallback_url=${encodedFallback}`;
+        ? `https://vidlink.pro/tv/${targetId}/${sNum}/${epNum}?primaryColor=${color}&secondaryColor=${secondaryColor}&iconColor=${color}&autoplay=true&title=false&poster=true&nextbutton=true&fallback_url=${encodedFallback}`
+        : `https://vidlink.pro/movie/${targetId}?primaryColor=${color}&secondaryColor=${secondaryColor}&iconColor=${color}&autoplay=true&title=false&poster=true&fallback_url=${encodedFallback}`;
     return {
       type: 'iframe',
       url,
@@ -299,12 +404,15 @@ export function generateStreamSource(
     };
   }
 
-  // 4. VixSrc (Ad-Free 4K Multi-Audio)
+  // 4. VixSrc (Ad-Free 4K Multi-Audio with full customization params & PLAYER_EVENT tracking)
   if (server === 'vixsrc') {
-    const url =
-      media.type === 'series'
-        ? `https://vixsrc.to/tv/${targetId}/${sNum}/${epNum}?primaryColor=${color}&secondaryColor=170000&autoplay=1`
-        : `https://vixsrc.to/movie/${targetId}?primaryColor=${color}&secondaryColor=170000&autoplay=1`;
+    const url = buildVixSrcEmbedUrl(
+      media.type,
+      targetId,
+      sNum,
+      epNum,
+      customization
+    );
     return {
       type: 'iframe',
       url,
