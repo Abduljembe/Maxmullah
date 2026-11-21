@@ -142,6 +142,7 @@ const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
 const searchCache = new Map<string, { results: Record<string, unknown>[]; fetchedAt: number }>();
 const malIdCache = new Map<string, { malId: number | null; fetchedAt: number }>();
+const serverSourcesCache = new Map<string, { data: Record<string, unknown>; fetchedAt: number }>();
 let tmdbConfigCache: { data: TMDBConfigurationPayload; fetchedAt: number } | null = null;
 
 const INDEX_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -149,6 +150,7 @@ const TMDB_CACHE_TTL_MS = 60 * 60 * 1000;
 const TMDB_CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const TMDB_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
+const SERVER_SOURCES_CACHE_TTL_MS = 10 * 60 * 1000;
 
 let streamsStoreCache: Record<string, SavedStreamEntry> | null = null;
 
@@ -884,7 +886,47 @@ async function startServer() {
         }
       }
 
+      const probeEmbedAvailability = async (url: string, timeoutMs = 2400): Promise<boolean> => {
+        try {
+          const r = await fetch(url, {
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            },
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          if (r.status !== 200) return false;
+          const html = await r.text();
+          if (html.length < 400) return false;
+          if (
+            /attention required|you have been blocked|cf-error-details|just a moment|404 not found|page not found|media unavailable|no media found/i.test(
+              html.slice(0, 4000)
+            )
+          ) {
+            return false;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
       const targetId = tmdbId > 0 ? String(tmdbId) : initialImdbId;
+      const cacheKey = `${type}:${targetId}:s${season}e${episode}:${isAnimeHint ? titleHint.toLowerCase() : ''}`;
+      const cachedSources = serverSourcesCache.get(cacheKey);
+      const streamsStore = await readStreamsStore();
+      const savedDirectCheck =
+        streamsStore[makeStreamKey(type, targetId, season, episode)] ||
+        (initialImdbId ? streamsStore[makeStreamKey(type, initialImdbId, season, episode)] : undefined);
+
+      if (cachedSources && Date.now() - cachedSources.fetchedAt < SERVER_SOURCES_CACHE_TTL_MS) {
+        res.json({
+          ...cachedSources.data,
+          directStreamUrl: savedDirectCheck?.url || cachedSources.data.directStreamUrl,
+        });
+        return;
+      }
+
       const targetParam = tmdbId > 0 ? `tmdb=${tmdbId}` : `imdb=${encodeURIComponent(initialImdbId)}`;
       const primeUrl =
         type === 'tv'
@@ -894,14 +936,38 @@ async function startServer() {
         type === 'tv'
           ? `https://vidlink.pro/tv/${targetId}/${season}/${episode}`
           : `https://vidlink.pro/movie/${targetId}`;
-
+      const vidfastUrl =
+        type === 'tv'
+          ? `https://vidfast.pro/tv/${targetId}/${season}/${episode}`
+          : `https://vidfast.pro/movie/${targetId}`;
+      const videasyUrl =
+        type === 'tv'
+          ? `https://player.videasy.net/tv/${targetId}/${season}/${episode}`
+          : `https://player.videasy.net/movie/${targetId}`;
       const vixEmbedUrl =
         type === 'tv'
           ? `https://vixsrc.to/tv/${targetId}/${season}/${episode}`
           : `https://vixsrc.to/movie/${targetId}`;
+      const vidsrcShUrl =
+        type === 'tv'
+          ? `https://vidsrc.sh/embed/tv?tmdb=${targetId}&season=${season}&episode=${episode}`
+          : `https://vidsrc.sh/embed/movie?tmdb=${targetId}`;
+      const twoEmbedUrl =
+        type === 'tv'
+          ? `https://www.2embed.cc/embedtv/${targetId}&s=${season}&e=${episode}`
+          : `https://www.2embed.cc/embed/${targetId}`;
 
-      const [streamsStore, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb, resolvedMalId] = await Promise.all([
-        readStreamsStore(),
+      const [
+        primeResult,
+        vidlinkOk,
+        vidfastOk,
+        videasyOk,
+        vixEmbedOk,
+        vidsrcShOk,
+        twoEmbedOk,
+        resolvedImdb,
+        resolvedMalId,
+      ] = await Promise.all([
         fetch(primeUrl, {
           headers: {
             Referer:
@@ -911,32 +977,16 @@ async function startServer() {
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
           },
-          signal: AbortSignal.timeout(4500),
+          signal: AbortSignal.timeout(2400),
         })
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null),
-        tmdbId > 0
-          ? fetch(vidlinkUrl, {
-              headers: {
-                'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-              },
-              signal: AbortSignal.timeout(4000),
-            })
-              .then((r) => r.status === 200)
-              .catch(() => false)
-          : Promise.resolve(false),
-        tmdbId > 0
-          ? fetch(vixEmbedUrl, {
-              headers: {
-                'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-              },
-              signal: AbortSignal.timeout(3000),
-            })
-              .then((r) => r.status === 200)
-              .catch(() => false)
-          : Promise.resolve(false),
+        tmdbId > 0 ? probeEmbedAvailability(vidlinkUrl) : Promise.resolve(false),
+        tmdbId > 0 ? probeEmbedAvailability(vidfastUrl) : Promise.resolve(false),
+        tmdbId > 0 ? probeEmbedAvailability(videasyUrl) : Promise.resolve(false),
+        tmdbId > 0 ? probeEmbedAvailability(vixEmbedUrl, 2000) : Promise.resolve(false),
+        tmdbId > 0 ? probeEmbedAvailability(vidsrcShUrl) : Promise.resolve(false),
+        tmdbId > 0 ? probeEmbedAvailability(twoEmbedUrl) : Promise.resolve(false),
         !initialImdbId && tmdbId > 0
           ? resolveImdbIdFromTMDB(type, tmdbId)
           : Promise.resolve(initialImdbId || null),
@@ -960,7 +1010,7 @@ async function startServer() {
 
       const finalImdbId = resolvedImdb || initialImdbId || undefined;
       const savedDirectEntry =
-        streamsStore[makeStreamKey(type, targetId, season, episode)] ||
+        savedDirectCheck ||
         (finalImdbId ? streamsStore[makeStreamKey(type, finalImdbId, season, episode)] : undefined);
 
       const inVixCatalog =
@@ -968,26 +1018,37 @@ async function startServer() {
         Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
       const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
-      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vidlink';
-      if (vidlinkOk) {
-        recommendedServer = 'vidlink';
-      } else if (vixsrcAvailable) {
-        recommendedServer = 'vixsrc';
-      } else {
-        recommendedServer = 'vidfast';
-      }
+      const verifiedServers: Array<'vidlink' | 'vidfast' | 'videasy' | 'vixsrc' | 'vidsrc_sh' | '2embed'> = [];
+      if (vidlinkOk) verifiedServers.push('vidlink');
+      if (vidfastOk) verifiedServers.push('vidfast');
+      if (videasyOk) verifiedServers.push('videasy');
+      if (vixsrcAvailable) verifiedServers.push('vixsrc');
+      if (vidsrcShOk) verifiedServers.push('vidsrc_sh');
+      if (twoEmbedOk) verifiedServers.push('2embed');
 
-      res.json({
+      const availableServers =
+        verifiedServers.length > 0
+          ? verifiedServers
+          : (['vidlink', 'vidfast', 'vidsrc_sh', '2embed'] as const);
+
+      const recommendedServer = availableServers[0];
+
+      const payload = {
         directStreamUrl: savedDirectEntry?.url,
         vidlinkAvailable: vidlinkOk,
+        vidfastAvailable: vidfastOk,
+        videasyAvailable: videasyOk,
         vixsrcAvailable,
+        availableServers,
         primeSrcHosts,
         resolvedTmdbId: tmdbId > 0 ? tmdbId : undefined,
         resolvedImdbId: finalImdbId,
         resolvedMalId: resolvedMalId || undefined,
         recommendedServer,
         info: primeInfo,
-      });
+      };
+      serverSourcesCache.set(cacheKey, { data: payload, fetchedAt: Date.now() });
+      res.json(payload);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to probe server sources';
       res.status(502).json({

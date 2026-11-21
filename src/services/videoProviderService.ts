@@ -785,7 +785,10 @@ export interface LivePrimeSrcHost {
 export interface LiveServerSourcesResponse {
   directStreamUrl?: string;
   vidlinkAvailable: boolean;
+  vidfastAvailable?: boolean;
+  videasyAvailable?: boolean;
   vixsrcAvailable: boolean;
+  availableServers?: AnyServerId[];
   primeSrcHosts: LivePrimeSrcHost[];
   resolvedTmdbId?: number;
   resolvedImdbId?: string;
@@ -841,46 +844,106 @@ export async function removeCustomDirectStream(
   }
 }
 
+const clientSourcesCache = new Map<
+  string,
+  { data: LiveServerSourcesResponse; fetchedAt: number }
+>();
+const clientSourcesInflight = new Map<string, Promise<LiveServerSourcesResponse>>();
+const CLIENT_SOURCES_TTL_MS = 5 * 60 * 1000;
+
+function makeClientSourcesCacheKey(media: MediaItem, season: number, episode: number): string {
+  const targetId = resolveTargetIdentifier(media);
+  const type = media.type === 'series' ? 'tv' : 'movie';
+  return `${type}:${targetId}:s${Math.max(1, season)}e${Math.max(1, episode)}`;
+}
+
+export function getCachedLiveServerSources(
+  media: MediaItem,
+  season = 1,
+  episode = 1
+): LiveServerSourcesResponse | null {
+  const key = makeClientSourcesCacheKey(media, season, episode);
+  const cached = clientSourcesCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < CLIENT_SOURCES_TTL_MS) {
+    return cached.data;
+  }
+  return null;
+}
+
+export function prefetchLiveServerSources(media: MediaItem, season = 1, episode = 1): void {
+  if (typeof window === 'undefined') return;
+  if (getCachedLiveServerSources(media, season, episode)) return;
+  void fetchLiveServerSources(media, season, episode);
+}
+
 export async function fetchLiveServerSources(
   media: MediaItem,
   season = 1,
   episode = 1
 ): Promise<LiveServerSourcesResponse> {
+  const key = makeClientSourcesCacheKey(media, season, episode);
+  const cached = clientSourcesCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < CLIENT_SOURCES_TTL_MS) {
+    return cached.data;
+  }
+
+  const existingInflight = clientSourcesInflight.get(key);
+  if (existingInflight) {
+    return existingInflight;
+  }
+
   const targetId = resolveTargetIdentifier(media);
   const tmdbId = /^\d+$/.test(targetId) ? targetId : media.tmdbId ? String(media.tmdbId) : '';
   const imdbId = media.imdbId || (targetId.startsWith('tt') ? targetId : '');
   const type = media.type === 'series' ? 'tv' : 'movie';
 
-  try {
-    const params = new URLSearchParams({
-      type,
-      season: String(Math.max(1, season)),
-      episode: String(Math.max(1, episode)),
-    });
-    if (tmdbId) params.set('tmdbId', tmdbId);
-    if (imdbId) params.set('imdbId', imdbId);
-    if (media.title) params.set('title', media.title);
-    if (isLikelyAnime(media) && !media.malId) params.set('isAnime', '1');
+  const requestPromise = (async (): Promise<LiveServerSourcesResponse> => {
+    try {
+      const params = new URLSearchParams({
+        type,
+        season: String(Math.max(1, season)),
+        episode: String(Math.max(1, episode)),
+      });
+      if (tmdbId) params.set('tmdbId', tmdbId);
+      if (imdbId) params.set('imdbId', imdbId);
+      if (media.title) params.set('title', media.title);
+      if (isLikelyAnime(media) && !media.malId) params.set('isAnime', '1');
 
-    const res = await fetch(`/api/servers/sources?${params.toString()}`);
-    if (res.ok) {
-      const data = (await res.json()) as Partial<LiveServerSourcesResponse>;
-      return {
-        directStreamUrl: data.directStreamUrl,
-        vidlinkAvailable: Boolean(data.vidlinkAvailable),
-        vixsrcAvailable: Boolean(data.vixsrcAvailable),
-        primeSrcHosts: Array.isArray(data.primeSrcHosts) ? data.primeSrcHosts : [],
-        resolvedTmdbId: typeof data.resolvedTmdbId === 'number' ? data.resolvedTmdbId : undefined,
-        resolvedImdbId: data.resolvedImdbId,
-        resolvedMalId: typeof data.resolvedMalId === 'number' ? data.resolvedMalId : undefined,
-        recommendedServer: data.recommendedServer,
-      };
+      const res = await fetch(`/api/servers/sources?${params.toString()}`);
+      if (res.ok) {
+        const data = (await res.json()) as Partial<LiveServerSourcesResponse>;
+        const normalized: LiveServerSourcesResponse = {
+          directStreamUrl: data.directStreamUrl,
+          vidlinkAvailable: Boolean(data.vidlinkAvailable),
+          vidfastAvailable: Boolean(data.vidfastAvailable),
+          videasyAvailable: Boolean(data.videasyAvailable),
+          vixsrcAvailable: Boolean(data.vixsrcAvailable),
+          availableServers: Array.isArray(data.availableServers) ? data.availableServers : undefined,
+          primeSrcHosts: Array.isArray(data.primeSrcHosts) ? data.primeSrcHosts : [],
+          resolvedTmdbId: typeof data.resolvedTmdbId === 'number' ? data.resolvedTmdbId : undefined,
+          resolvedImdbId: data.resolvedImdbId,
+          resolvedMalId: typeof data.resolvedMalId === 'number' ? data.resolvedMalId : undefined,
+          recommendedServer: data.recommendedServer,
+        };
+        clientSourcesCache.set(key, { data: normalized, fetchedAt: Date.now() });
+        return normalized;
+      }
+    } catch (err) {
+      console.warn('fetchLiveServerSources error:', err);
+    } finally {
+      clientSourcesInflight.delete(key);
     }
-  } catch (err) {
-    console.warn('fetchLiveServerSources error:', err);
-  }
 
-  return { vidlinkAvailable: false, vixsrcAvailable: false, primeSrcHosts: [] };
+    return {
+      vidlinkAvailable: false,
+      vixsrcAvailable: false,
+      availableServers: ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'],
+      primeSrcHosts: [],
+    };
+  })();
+
+  clientSourcesInflight.set(key, requestPromise);
+  return requestPromise;
 }
 
 export interface MovieDownloadMirror {
