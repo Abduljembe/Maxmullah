@@ -333,9 +333,46 @@ interface CinemetaItem {
   description?: string;
   releaseInfo?: string;
   imdbRating?: string;
+  genre?: string[];
   genres?: string[];
   cast?: string[];
   director?: string[];
+}
+
+const TMDB_GENRE_ID_TO_CINEMETA: Record<number, string> = {
+  28: 'Action',
+  12: 'Adventure',
+  16: 'Animation',
+  35: 'Comedy',
+  80: 'Crime',
+  99: 'Documentary',
+  18: 'Drama',
+  10751: 'Family',
+  14: 'Fantasy',
+  36: 'History',
+  27: 'Horror',
+  10402: 'Music',
+  9648: 'Mystery',
+  10749: 'Romance',
+  878: 'Sci-Fi',
+  53: 'Thriller',
+  10752: 'War',
+  37: 'Western',
+  10759: 'Action',
+  10765: 'Sci-Fi',
+  10768: 'War',
+};
+
+const cinemetaChunkCache = new Map<string, { metas: CinemetaItem[]; fetchedAt: number }>();
+const cinemetaMetaCache = new Map<string, { meta: CinemetaItem | null; fetchedAt: number }>();
+
+function stableNumericIdFromString(seed: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) || 1;
 }
 
 function mapCinemetaToTMDBShape(
@@ -346,22 +383,31 @@ function mapCinemetaToTMDBShape(
   const yearMatch = (meta.releaseInfo || '').match(/\d{4}/);
   const yearStr = yearMatch ? `${yearMatch[0]}-01-01` : '2024-01-01';
   const tmdbNumeric = meta.moviedb_id && meta.moviedb_id > 0 ? meta.moviedb_id : 0;
+  const imdbId = meta.imdb_id || meta.id;
+  const numericFallbackId = tmdbNumeric || stableNumericIdFromString(`${fallbackType}:${imdbId || meta.name || 'item'}`);
   const parsedRating = parseFloat(meta.imdbRating || '');
+  const genreNames =
+    (Array.isArray(meta.genres) && meta.genres.length > 0 ? meta.genres : meta.genre) || [];
+  const posterUrl =
+    meta.poster ||
+    (imdbId && imdbId.startsWith('tt')
+      ? `https://images.metahub.space/poster/medium/${imdbId}/img`
+      : null);
 
   return {
-    id: tmdbNumeric,
+    id: numericFallbackId,
     moviedb_id: tmdbNumeric || undefined,
-    imdb_id: meta.imdb_id || meta.id,
+    imdb_id: imdbId,
     media_type: isTv ? 'tv' : 'movie',
     title: !isTv ? meta.name : undefined,
     name: isTv ? meta.name : undefined,
-    poster_path: meta.poster || null,
-    backdrop_path: meta.background || meta.poster || null,
+    poster_path: posterUrl,
+    backdrop_path: meta.background || posterUrl,
     release_date: !isTv ? yearStr : undefined,
     first_air_date: isTv ? yearStr : undefined,
     overview: meta.description || '',
     vote_average: Number.isFinite(parsedRating) && parsedRating > 0 ? parsedRating : 0,
-    genres: (meta.genres || []).map((g, i) => ({ id: i + 1, name: g })),
+    genres: genreNames.map((g, i) => ({ id: i + 1, name: g })),
     credits: {
       cast: (meta.cast || []).slice(0, 4).map((name) => ({ name })),
       crew: (meta.director || []).slice(0, 1).map((name) => ({ name, job: 'Director' })),
@@ -374,14 +420,25 @@ async function fetchCinemetaMeta(
   imdbId: string
 ): Promise<CinemetaItem | null> {
   if (!imdbId || !imdbId.startsWith('tt')) return null;
+  const cacheKey = `${type}:${imdbId}`;
+  const cached = cinemetaMetaCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < TMDB_CACHE_TTL_MS) {
+    return cached.meta;
+  }
+
   const cmType = type === 'tv' ? 'series' : 'movie';
   try {
     const res = await fetch(`https://v3-cinemeta.strem.io/meta/${cmType}/${imdbId}.json`, {
-      signal: AbortSignal.timeout(4500),
+      signal: AbortSignal.timeout(3500),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      cinemetaMetaCache.set(cacheKey, { meta: null, fetchedAt: Date.now() });
+      return null;
+    }
     const data = (await res.json()) as { meta?: CinemetaItem };
-    return data?.meta || null;
+    const meta = data?.meta || null;
+    cinemetaMetaCache.set(cacheKey, { meta, fetchedAt: Date.now() });
+    return meta;
   } catch {
     return null;
   }
@@ -404,8 +461,7 @@ async function searchCinemeta(
         );
         if (!res.ok) return [];
         const data = (await res.json()) as { metas?: CinemetaItem[] };
-        const metas = (data?.metas || []).slice(0, 8);
-        // Hydrate moviedb_id in parallel for top hits so VidLink / VidFast / VixSrc work cleanly
+        const metas = (data?.metas || []).slice(0, 12);
         const hydrated = await Promise.all(
           metas.map(async (m) => {
             const full = await fetchCinemetaMeta(t, m.imdb_id || m.id);
@@ -422,22 +478,93 @@ async function searchCinemeta(
   return rawLists.flat();
 }
 
+async function fetchCinemetaCatalogChunk(
+  cmType: 'movie' | 'series',
+  catalogName: 'top' | 'year' | 'imdbRating',
+  skip: number,
+  genreName?: string
+): Promise<CinemetaItem[]> {
+  const extraParts: string[] = [];
+  if (genreName) extraParts.push(`genre=${encodeURIComponent(genreName)}`);
+  if (skip > 0) extraParts.push(`skip=${skip}`);
+  const extraSuffix = extraParts.length > 0 ? `/${extraParts.join('&')}` : '';
+  const url = `https://v3-cinemeta.strem.io/catalog/${cmType}/${catalogName}${extraSuffix}.json`;
+
+  const cached = cinemetaChunkCache.get(url);
+  if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
+    return cached.metas;
+  }
+
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(6500) });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { metas?: CinemetaItem[] };
+    const metas = Array.isArray(data?.metas) ? data.metas : [];
+    if (metas.length > 0) {
+      cinemetaChunkCache.set(url, { metas, fetchedAt: Date.now() });
+    }
+    return metas;
+  } catch {
+    return [];
+  }
+}
+
 async function fetchCinemetaCatalogFallback(
   type: 'movie' | 'tv',
-  catalogName: 'top' | 'imdbRating' = 'top'
-): Promise<{ results: Record<string, unknown>[]; total_pages: number; total_results: number }> {
+  options: {
+    catalogName?: 'top' | 'year' | 'imdbRating';
+    page?: number;
+    genreName?: string;
+  } = {}
+): Promise<{ page: number; results: Record<string, unknown>[]; total_pages: number; total_results: number }> {
   const cmType = type === 'tv' ? 'series' : 'movie';
+  const catalogName = options.catalogName || 'top';
+  const page = Math.max(1, options.page || 1);
+  const pageSize = 20;
+  const startIndex = (page - 1) * pageSize;
+  const endIndex = startIndex + pageSize;
+  const firstChunkSkip = Math.floor(startIndex / 50) * 50;
+  const secondChunkSkip = Math.floor((endIndex - 1) / 50) * 50;
+
   try {
-    const res = await fetch(`https://v3-cinemeta.strem.io/catalog/${cmType}/${catalogName}.json`, {
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!res.ok) return { results: [], total_pages: 1, total_results: 0 };
-    const data = (await res.json()) as { metas?: CinemetaItem[] };
-    const metas = (data?.metas || []).slice(0, 20);
-    const results = metas.map((m) => mapCinemetaToTMDBShape(m, type));
-    return { results, total_pages: 1, total_results: results.length };
+    const chunkPromises: Promise<CinemetaItem[]>[] = [
+      fetchCinemetaCatalogChunk(cmType, catalogName, firstChunkSkip, options.genreName),
+    ];
+    if (secondChunkSkip !== firstChunkSkip) {
+      chunkPromises.push(
+        fetchCinemetaCatalogChunk(cmType, catalogName, secondChunkSkip, options.genreName)
+      );
+    }
+
+    const chunks = await Promise.all(chunkPromises);
+    const firstChunk = chunks[0] || [];
+    const secondChunk = chunks[1] || [];
+
+    const combined: CinemetaItem[] =
+      secondChunkSkip !== firstChunkSkip ? [...firstChunk, ...secondChunk] : firstChunk;
+    const offsetInFirst = startIndex - firstChunkSkip;
+    let slice = combined.slice(offsetInFirst, offsetInFirst + pageSize);
+
+    // If a genre/sort combination returned nothing on page 1, fallback cleanly to top unfiltered
+    if (slice.length === 0 && options.genreName && page === 1) {
+      const topFallback = await fetchCinemetaCatalogChunk(cmType, 'top', 0);
+      slice = topFallback.slice(0, pageSize);
+    }
+
+    const results = slice.map((m) => mapCinemetaToTMDBShape(m, type));
+    const hasMoreEstimate =
+      results.length >= pageSize ||
+      (secondChunkSkip !== firstChunkSkip ? secondChunk.length >= 45 : firstChunk.length >= 45);
+    const totalPages = hasMoreEstimate ? Math.max(page + 25, 100) : page;
+
+    return {
+      page,
+      results,
+      total_pages: totalPages,
+      total_results: totalPages * pageSize,
+    };
   } catch {
-    return { results: [], total_pages: 1, total_results: 0 };
+    return { page, results: [], total_pages: 1, total_results: 0 };
   }
 }
 
@@ -720,17 +847,47 @@ async function startServer() {
     }
 
     // Zero-key Cinemeta fallback if TMDB credentials are not set or TMDB is unreachable
-    const isTv = tmdbSubpath.includes('tv');
+    const isTv =
+      tmdbSubpath.startsWith('tv') ||
+      tmdbSubpath.includes('/tv/') ||
+      tmdbSubpath.includes('discover/tv');
     const queryParam = typeof req.query.query === 'string' ? req.query.query.trim() : '';
+    const pageParam = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+
     if (queryParam) {
       const results = await searchCinemeta(queryParam, isTv ? 'tv' : 'movie');
-      res.json({ results, total_pages: 1, total_results: results.length });
+      res.json({ page: pageParam, results, total_pages: 1, total_results: results.length });
       return;
     }
-    const fallback = await fetchCinemetaCatalogFallback(
-      isTv ? 'tv' : 'movie',
-      tmdbSubpath.includes('top_rated') ? 'imdbRating' : 'top'
-    );
+
+    const rawGenreIds = typeof req.query.with_genres === 'string' ? req.query.with_genres : '';
+    const firstGenreId = parseInt(rawGenreIds.split(',')[0] || '0', 10);
+    const genreName = firstGenreId > 0 ? TMDB_GENRE_ID_TO_CINEMETA[firstGenreId] : undefined;
+    const sortBy = typeof req.query.sort_by === 'string' ? req.query.sort_by : '';
+
+    let catalogName: 'top' | 'year' | 'imdbRating' = 'top';
+    if (
+      tmdbSubpath.includes('top_rated') ||
+      sortBy.includes('vote_average')
+    ) {
+      catalogName = 'imdbRating';
+    } else if (
+      tmdbSubpath.includes('now_playing') ||
+      tmdbSubpath.includes('upcoming') ||
+      tmdbSubpath.includes('on_the_air') ||
+      sortBy.includes('release_date')
+    ) {
+      catalogName = 'year';
+    }
+
+    const fallback = await fetchCinemetaCatalogFallback(isTv ? 'tv' : 'movie', {
+      catalogName,
+      page: pageParam,
+      genreName,
+    });
+    if (fallback.results.length > 0) {
+      tmdbProxyCache.set(cacheKey, { data: fallback, fetchedAt: Date.now() });
+    }
     res.json(fallback);
   });
 
@@ -822,6 +979,24 @@ async function startServer() {
       );
 
       const items = hydrated.filter((item): item is Record<string, unknown> => item !== null);
+      if (items.length < 10) {
+        const cmFallback = await fetchCinemetaCatalogFallback(rawType, {
+          catalogName: 'top',
+          page,
+        });
+        const existingKeys = new Set(
+          items.map((it) => String(it.imdb_id || it.id || ''))
+        );
+        for (const extra of cmFallback.results) {
+          const k = String(extra.imdb_id || extra.id || '');
+          if (k && !existingKeys.has(k)) {
+            existingKeys.add(k);
+            items.push(extra);
+          }
+          if (items.length >= pageSize) break;
+        }
+      }
+
       res.json({
         items,
         page,

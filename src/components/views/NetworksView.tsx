@@ -48,6 +48,8 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
   const totalPagesRef = useRef(500);
   const fetchingRef = useRef(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const fallbackRef = useRef(fallbackCatalog);
+  fallbackRef.current = fallbackCatalog;
 
   const watchProviderId =
     selectedPlatform !== 'ALL' ? TMDB_WATCH_PROVIDER_IDS[selectedPlatform] : undefined;
@@ -86,13 +88,13 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
           );
           setHasMorePages(pageToLoad < totalPagesRef.current);
         } else if (!append) {
-          setItems(fallbackCatalog);
+          setItems(fallbackRef.current);
           setHasMorePages(false);
         } else {
           setHasMorePages(false);
         }
       } catch {
-        if (!append) setItems(fallbackCatalog);
+        if (!append) setItems(fallbackRef.current);
         setHasMorePages(false);
       } finally {
         setIsLoading(false);
@@ -100,7 +102,7 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
         fetchingRef.current = false;
       }
     },
-    [watchProviderId, fallbackCatalog]
+    [watchProviderId]
   );
 
   useEffect(() => {

@@ -550,19 +550,19 @@ export async function fetchServerMovies(options: {
       if (genreId && genreId > 0) {
         discoverParams.with_genres = genreId;
       }
-      if (withoutGenres) {
+      if (withoutGenres && !watchProviderId) {
         discoverParams.without_genres = withoutGenres;
       }
       if (watchProviderId && watchProviderId > 0) {
         discoverParams.with_watch_providers = watchProviderId;
         discoverParams.watch_region = 'US';
       }
-      if (typeof minVotes === 'number' && minVotes > 0) {
+      if (typeof minVotes === 'number' && minVotes > 0 && !watchProviderId) {
         discoverParams['vote_count.gte'] = minVotes;
       } else if (feed === 'top_rated') {
-        discoverParams['vote_count.gte'] = 200;
-      } else if (genreId && genreId > 0) {
-        discoverParams['vote_count.gte'] = 100;
+        discoverParams['vote_count.gte'] = watchProviderId ? 25 : 200;
+      } else if (genreId && genreId > 0 && !watchProviderId) {
+        discoverParams['vote_count.gte'] = 50;
       }
       if (releasedOnly || feed === 'now_playing' || (genreId && genreId > 0)) {
         discoverParams['primary_release_date.lte'] = new Date().toISOString().slice(0, 10);
@@ -609,12 +609,13 @@ export async function fetchAllServerMoviesMultiFeed(page = 1): Promise<MediaItem
       paths.map((p) => tmdbFetchJson<{ results?: RawTMDBItem[] }>(p, { page }))
     );
 
-    const map = new Map<number, MediaItem>();
+    const map = new Map<string, MediaItem>();
     responses.forEach((res) => {
       if (res.status === 'fulfilled' && res.value && Array.isArray(res.value.results)) {
         res.value.results.forEach((raw: RawTMDBItem) => {
-          if (raw.id && raw.title && !map.has(raw.id)) {
-            map.set(raw.id, normalizeTMDBItem(raw, 'movie'));
+          const dedupKey = String(raw.id || raw.imdb_id || raw.title || '');
+          if (raw.title && dedupKey && !map.has(dedupKey)) {
+            map.set(dedupKey, normalizeTMDBItem(raw, 'movie'));
           }
         });
       }
@@ -723,12 +724,13 @@ export async function fetchAllServerSeriesMultiFeed(page = 1): Promise<MediaItem
       paths.map((p) => tmdbFetchJson<{ results?: RawTMDBItem[] }>(p, { page }))
     );
 
-    const map = new Map<number, MediaItem>();
+    const map = new Map<string, MediaItem>();
     responses.forEach((res) => {
       if (res.status === 'fulfilled' && res.value && Array.isArray(res.value.results)) {
         res.value.results.forEach((raw: RawTMDBItem) => {
-          if (raw.id && raw.name && !map.has(raw.id)) {
-            map.set(raw.id, normalizeTMDBItem(raw, 'series'));
+          const dedupKey = String(raw.id || raw.imdb_id || raw.name || '');
+          if (raw.name && dedupKey && !map.has(dedupKey)) {
+            map.set(dedupKey, normalizeTMDBItem(raw, 'series'));
           }
         });
       }
@@ -817,17 +819,19 @@ export async function fetchLiveTrendingPaged(
     }
   } catch {}
 
-  if (page === 1) {
-    try {
-      const res = await fetch(`${TVMAZE_BASE_URL}/shows?page=0`);
-      if (res.ok) {
-        const shows: TVMazeShow[] = await res.json();
-        const items = shows.slice(0, 18).map(normalizeTVMazeShow);
-        return { items, page: 1, totalPages: 1, totalResults: items.length };
+  try {
+    const tvmazePage = Math.max(0, Math.floor((page - 1) / 10));
+    const chunkOffset = ((page - 1) % 10) * 20;
+    const res = await fetch(`${TVMAZE_BASE_URL}/shows?page=${tvmazePage}`);
+    if (res.ok) {
+      const shows: TVMazeShow[] = await res.json();
+      const items = shows.slice(chunkOffset, chunkOffset + 20).map(normalizeTVMazeShow);
+      if (items.length > 0) {
+        return { items, page, totalPages: 50, totalResults: 1000 };
       }
-    } catch (err) {
-      console.warn('TVMaze live catalog fetch fallback', err);
     }
+  } catch (err) {
+    console.warn('TVMaze live catalog fetch fallback', err);
   }
 
   return { items: [], page, totalPages: 1, totalResults: 0 };
