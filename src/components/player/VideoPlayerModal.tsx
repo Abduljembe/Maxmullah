@@ -18,6 +18,8 @@ import {
   RefreshCw,
   ArrowDownToLine,
   ShieldCheck,
+  Settings,
+  Captions,
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { MediaItem } from '../../types';
@@ -90,9 +92,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     isOffline && hasPlayableDownloadedFile ? 'offline' : 'stream'
   );
 
-  // Inbuilt background server routing & silent failover (defaults to fast HTTP-200 VidFast player)
+  // Default to fastest ad-free VidLink/VidFast routing (no ad/captcha PrimeSrc hosts)
   const [selectedServer, setSelectedServer] = useState<AnyServerId>(() => {
-    return getVideoProviderConfig().vidukiServer || 'vidfast';
+    const saved = getVideoProviderConfig().vidukiServer;
+    return saved === 'primesrc' ? 'vidlink' : saved || 'vidlink';
   });
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
@@ -158,14 +161,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         return;
       }
 
-      // Auto-route away from blocked or unavailable servers (e.g., Cloudflare-blocked vixsrc)
+      // Auto-route away only from unavailable ad-free servers (never auto-select ad/captcha PrimeSrc)
       if (!userManuallyPickedServerRef.current && res.recommendedServer) {
         const currentUnavailable =
           (selectedServer === 'vixsrc' && !res.vixsrcAvailable) ||
-          (selectedServer === 'vidlink' && !res.vidlinkAvailable) ||
-          (selectedServer === 'primesrc' && res.primeSrcHosts.length === 0);
+          (selectedServer === 'vidlink' && !res.vidlinkAvailable);
 
-        if (currentUnavailable && res.recommendedServer !== selectedServer) {
+        if (
+          currentUnavailable &&
+          res.recommendedServer !== 'primesrc' &&
+          res.recommendedServer !== selectedServer
+        ) {
           setSelectedServer(res.recommendedServer);
           setIframeLoaded(false);
           setIframeKey((k) => k + 1);
@@ -177,7 +183,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [media, currentSeason, currentEpisode, isOffline]);
 
-  // Silent background failover if an embed frame stalls without loading for 6.5s
+  // Fast background failover (4s) across ad-free mirrors if an embed frame stalls
   useEffect(() => {
     if (playerMode !== 'stream' || iframeLoaded) return;
     const timeout = window.setTimeout(() => {
@@ -187,7 +193,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       setIframeKey((k) => k + 1);
       const cfg = getVideoProviderConfig();
       saveVideoProviderConfig({ ...cfg, vidukiServer: nextServer });
-    }, 6500);
+    }, 4000);
     return () => window.clearTimeout(timeout);
   }, [playerMode, iframeLoaded, selectedServer, currentSeason, currentEpisode, iframeKey]);
 
@@ -622,38 +628,23 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="fixed inset-0 z-50 bg-black flex items-center justify-center select-none overflow-hidden"
+      className={`fixed inset-0 z-50 bg-black flex items-center justify-center select-none overflow-hidden ${
+        isFullscreen ? 'p-0' : 'p-2 sm:p-4 md:p-6'
+      }`}
     >
-      {/* 1. STREAMING PLAYER */}
+      {/* 1. STREAMING PLAYER (Clean Picture-2 Framed Dark Stage, Fast Instant Load) */}
       {playerMode === 'stream' && (
-        <div className="w-full h-full relative flex flex-col bg-black">
-          {/* Smooth Backdrop Loading Curtain (Fades out automatically when player loads) */}
-          <div
-            className={`absolute inset-0 z-10 flex flex-col items-center justify-center bg-black transition-opacity duration-300 ${
-              iframeLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'
-            }`}
-          >
-            {media.backdropUrl && (
-              <img
-                src={media.backdropUrl}
-                alt=""
-                referrerPolicy="no-referrer"
-                className="absolute inset-0 w-full h-full object-cover opacity-30 blur-md scale-105"
-              />
-            )}
-            <div className="relative z-10 flex flex-col items-center gap-3 text-center px-6">
-              <Loader2 className="w-11 h-11 text-rose-500 animate-spin" />
-              <p className="text-sm font-semibold text-white tracking-tight">
-                Starting {media.title} on {activeStreamSource.providerName}...
-              </p>
-              <button
-                onClick={() => handleSelectServer(getNextFastestServer(selectedServer))}
-                className="mt-1 px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
-              >
-                Switch Server
-              </button>
+        <div
+          className={`w-full h-full relative flex flex-col bg-black overflow-hidden ${
+            isFullscreen ? '' : 'rounded-xl border border-white/10'
+          }`}
+        >
+          {/* Minimal Pitch-Black Loading State (No noisy blurred backdrop flash) */}
+          {!iframeLoaded && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black">
+              <Loader2 className="w-8 h-8 text-white/80 animate-spin" />
             </div>
-          </div>
+          )}
 
           <iframe
             key={`player-frame-${selectedServer}-${currentSeason}-${currentEpisode}-${iframeKey}`}
@@ -669,7 +660,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             referrerPolicy="origin"
             allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *; accelerometer; gyroscope; clipboard-write; web-share"
             allowFullScreen
-            className={`w-full h-full border-0 transition-opacity duration-300 ${
+            className={`w-full h-full border-0 bg-black transition-opacity duration-150 ${
               iframeLoaded ? 'opacity-100' : 'opacity-0'
             }`}
           />
@@ -678,7 +669,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
       {/* 2. TRAILER */}
       {playerMode === 'trailer' && (
-        <div className="w-full h-full relative bg-black">
+        <div
+          className={`w-full h-full relative bg-black overflow-hidden ${
+            isFullscreen ? '' : 'rounded-xl border border-white/10'
+          }`}
+        >
           <iframe
             src={`https://www.youtube-nocookie.com/embed/${trailerId}?autoplay=1&mute=0&controls=1&rel=0&modestbranding=1`}
             title={`${media.title} Trailer`}
@@ -689,9 +684,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         </div>
       )}
 
-      {/* 3. INBUILT NATIVE HTML5 & HLS PLAYER (Active for Downloads & Direct Streams) */}
+      {/* 3. INBUILT NATIVE HTML5 & HLS PLAYER (Matches Picture 2 Monochrome Dark Controls) */}
       {(playerMode === 'offline' || playerMode === 'native') && (
-        <div className="relative w-full h-full flex items-center justify-center bg-black">
+        <div
+          className={`relative w-full h-full flex items-center justify-center bg-black overflow-hidden ${
+            isFullscreen ? '' : 'rounded-xl border border-white/10'
+          }`}
+        >
           <video
             ref={videoRef}
             playsInline
@@ -712,28 +711,40 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           />
 
           {isLoading && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none bg-black/40">
-              <Loader2 className="w-12 h-12 text-rose-500 animate-spin" />
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none bg-black/50">
+              <Loader2 className="w-10 h-10 text-white animate-spin" />
             </div>
           )}
 
+          {/* Crisp White Centered Play Triangle (matches Picture 2) */}
           {!isPlaying && !isLoading && (
             <button
               onClick={togglePlay}
-              className="absolute w-20 h-20 rounded-full bg-rose-600/90 hover:bg-rose-600 text-white flex items-center justify-center shadow-2xl backdrop-blur-md transition-transform hover:scale-110 cursor-pointer"
+              aria-label="Play video"
+              className="absolute flex items-center justify-center text-white/90 hover:text-white hover:scale-110 transition-transform cursor-pointer drop-shadow-2xl"
             >
-              <Play className="w-8 h-8 fill-current ml-1" />
+              <Play className="w-14 h-14 sm:w-16 sm:h-16 fill-current ml-1" />
             </button>
           )}
 
-          {/* Bottom Controls */}
+          {/* Bottom Controls matching Picture 2 */}
           <div
-            className={`absolute bottom-0 left-0 right-0 p-4 sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent transition-opacity duration-300 ${
-              showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            className={`absolute bottom-0 left-0 right-0 px-4 sm:px-5 pb-3 pt-10 bg-gradient-to-t from-black/95 via-black/45 to-transparent transition-opacity duration-200 ${
+              showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
             }`}
           >
-            {/* Progress Scrubber */}
-            <div className="group relative mb-4">
+            {/* Clean Thin Monochrome White Progress Scrubber */}
+            <div className="group relative mb-3 h-3 flex items-center">
+              <div className="w-full h-[3px] group-hover:h-[5px] bg-white/25 rounded-full overflow-hidden relative transition-all">
+                <div
+                  className="absolute left-0 top-0 bottom-0 bg-white/35 transition-all"
+                  style={{ width: `${Math.min(100, (bufferedTime / (duration || 1)) * 100)}%` }}
+                />
+                <div
+                  className="absolute left-0 top-0 bottom-0 bg-white transition-all"
+                  style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                />
+              </div>
               <input
                 type="range"
                 min={0}
@@ -741,34 +752,27 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 step={0.1}
                 value={currentTime}
                 onChange={handleSeek}
-                className="w-full h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer accent-rose-600 group-hover:h-2.5 transition-all relative z-10"
-              />
-              <div
-                className="absolute left-0 top-0 h-1.5 group-hover:h-2.5 bg-white/30 rounded-full pointer-events-none transition-all"
-                style={{ width: `${Math.min(100, (bufferedTime / (duration || 1)) * 100)}%` }}
-              />
-              <div
-                className="absolute left-0 top-0 h-1.5 group-hover:h-2.5 bg-rose-600 rounded-full pointer-events-none transition-all z-10"
-                style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3 sm:gap-4">
+            <div className="flex items-center justify-between gap-4 text-white">
+              <div className="flex items-center gap-3.5 sm:gap-4">
                 <button
                   onClick={togglePlay}
-                  className="p-2.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white transition-colors cursor-pointer"
+                  className="p-1 text-white/90 hover:text-white transition-colors cursor-pointer"
+                  title={isPlaying ? 'Pause' : 'Play'}
                 >
                   {isPlaying ? (
-                    <Pause className="w-5 h-5" />
+                    <Pause className="w-5 h-5 fill-current" />
                   ) : (
-                    <Play className="w-5 h-5 fill-current ml-0.5" />
+                    <Play className="w-5 h-5 fill-current" />
                   )}
                 </button>
 
                 <button
                   onClick={() => skipTime(-10)}
-                  className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                  className="p-1 text-white/80 hover:text-white transition-colors cursor-pointer"
                   title="Rewind 10s"
                 >
                   <RotateCcw className="w-5 h-5" />
@@ -776,16 +780,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
                 <button
                   onClick={() => skipTime(10)}
-                  className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                  className="p-1 text-white/80 hover:text-white transition-colors cursor-pointer"
                   title="Forward 10s"
                 >
                   <RotateCw className="w-5 h-5" />
                 </button>
 
-                <div className="flex items-center gap-2">
+                <div className="group/vol flex items-center gap-2">
                   <button
                     onClick={toggleMute}
-                    className="text-slate-300 hover:text-white transition-colors cursor-pointer"
+                    className="p-1 text-white/85 hover:text-white transition-colors cursor-pointer"
+                    title={isMuted ? 'Unmute' : 'Mute'}
                   >
                     {isMuted || volume === 0 ? (
                       <VolumeX className="w-5 h-5" />
@@ -800,35 +805,47 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     step={0.05}
                     value={isMuted ? 0 : volume}
                     onChange={handleVolumeChange}
-                    className="w-16 sm:w-20 h-1 bg-white/20 rounded-full appearance-none accent-rose-600 cursor-pointer"
+                    className="w-0 group-hover/vol:w-16 opacity-0 group-hover/vol:opacity-100 h-1 bg-white/30 rounded-full appearance-none accent-white cursor-pointer transition-all duration-200"
                   />
                 </div>
 
-                <span className="text-xs text-slate-300 font-mono hidden sm:inline tabular-nums">
+                <span className="text-xs text-white/90 font-medium tabular-nums tracking-tight">
                   {formatTime(currentTime)} / {formatTime(duration)}
                 </span>
               </div>
 
-              <div className="flex items-center gap-2">
-                <select
-                  value={playbackSpeed}
-                  onChange={(e) => {
-                    const spd = parseFloat(e.target.value);
-                    setPlaybackSpeed(spd);
-                    if (videoRef.current) videoRef.current.playbackRate = spd;
-                  }}
-                  className="bg-white/10 text-white text-xs font-semibold rounded-lg px-2 py-1 border border-white/10 cursor-pointer"
+              <div className="flex items-center gap-3">
+                <div className="relative flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const speeds = [1, 1.25, 1.5, 2, 0.75];
+                      const next = speeds[(speeds.indexOf(playbackSpeed) + 1) % speeds.length];
+                      setPlaybackSpeed(next);
+                      if (videoRef.current) videoRef.current.playbackRate = next;
+                    }}
+                    className="p-1 text-white/85 hover:text-white transition-colors cursor-pointer flex items-center gap-1"
+                    title={`Playback Speed (${playbackSpeed}x)`}
+                  >
+                    <Settings className="w-5 h-5" />
+                    {playbackSpeed !== 1 && (
+                      <span className="text-[11px] font-mono">{playbackSpeed}x</span>
+                    )}
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowSourceMenu(true)}
+                  className="p-1 text-white/85 hover:text-white transition-colors cursor-pointer"
+                  title="Subtitles & Player Settings"
                 >
-                  {[0.5, 1, 1.25, 1.5, 2].map((s) => (
-                    <option key={s} value={s} className="bg-slate-900">
-                      {s}x
-                    </option>
-                  ))}
-                </select>
+                  <Captions className="w-5 h-5" />
+                </button>
 
                 <button
                   onClick={toggleFullscreen}
-                  className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                  className="p-1 text-white/85 hover:text-white transition-colors cursor-pointer"
                   title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
                 >
                   {isFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
@@ -895,9 +912,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </div>
           )}
 
-          {/* Quick 1-Click Ad-Free Server Switcher */}
+          {/* Quick 1-Click Fast Ad-Free Server Switcher */}
           <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl bg-white/10 border border-white/10 text-xs">
-            {(['vidfast', 'primesrc', 'vidlink', 'vixsrc'] as AnyServerId[]).map((srvId) => {
+            {(['vidlink', 'vidfast', 'vixsrc'] as AnyServerId[]).map((srvId) => {
               const def = VIDUKI_SERVERS.find((s) => s.id === srvId);
               if (!def) return null;
               const isActive = selectedServer === srvId && playerMode === 'stream';
@@ -907,7 +924,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   onClick={() => handleSelectServer(srvId)}
                   className={`px-2.5 py-1 rounded-lg font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     isActive
-                      ? 'bg-rose-600 text-white'
+                      ? 'bg-white text-black'
                       : 'text-slate-300 hover:text-white hover:bg-white/10'
                   }`}
                 >
@@ -1042,6 +1059,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     </span>
                     <div className="flex items-center gap-1.5">
                       {[
+                        { label: 'Pure White', primary: 'FFFFFF', secondary: '3F3F46', icon: 'FFFFFF' },
                         { label: 'Crimson', primary: 'B20710', secondary: '170000', icon: 'FFFFFF' },
                         { label: 'Teal', primary: '63B8BC', secondary: 'A2A2A2', icon: 'EEFDEC' },
                         { label: 'Rose', primary: 'E11D48', secondary: '19060D', icon: 'FFE4E6' },

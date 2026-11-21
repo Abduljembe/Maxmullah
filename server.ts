@@ -868,13 +868,11 @@ async function startServer() {
         Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
       const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
-      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vidfast';
-      if (vixsrcAvailable) {
-        recommendedServer = 'vixsrc';
-      } else if (primeSrcHosts.length > 0) {
-        recommendedServer = 'primesrc';
-      } else if (vidlinkOk) {
+      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vidlink';
+      if (vidlinkOk) {
         recommendedServer = 'vidlink';
+      } else if (vixsrcAvailable) {
+        recommendedServer = 'vixsrc';
       } else {
         recommendedServer = 'vidfast';
       }

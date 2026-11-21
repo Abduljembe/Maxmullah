@@ -37,8 +37,17 @@ export interface VidukiServerDefinition {
 
 export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
   {
+    id: 'vidlink',
+    name: 'VidLink Fast',
+    tag: 'Ad-Free · Instant',
+    badge: 'VidLink',
+    description: 'Clean minimal HD player with instant load and silent VidFast auto-fallback.',
+    adFree: true,
+    latencyMs: 35,
+  },
+  {
     id: 'vidfast',
-    name: 'VidFast',
+    name: 'VidFast Turbo',
     tag: 'Ad-Free · Turbo',
     badge: 'VidFast',
     description: 'Zero popups with adaptive HLS streaming and auto-next episode.',
@@ -46,22 +55,13 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
     latencyMs: 45,
   },
   {
-    id: 'primesrc',
-    name: 'PrimeSrc Multi-Host',
-    tag: 'Multi-Host',
-    badge: 'PrimeSrc',
-    description: 'Aggregates Filemoon, Voe, Luluvdoo, Streamtape, Mixdrop, Dood & Vidmoly.',
+    id: 'vixsrc',
+    name: 'VixSrc HD',
+    tag: '4K · Multi-Audio',
+    badge: 'VixSrc',
+    description: '4K & HD multi-audio stream (when available in your region).',
     adFree: true,
-    latencyMs: 55,
-  },
-  {
-    id: 'vidlink',
-    name: 'VidLink',
-    tag: 'Auto-Fallback',
-    badge: 'VidLink',
-    description: 'Fast HD player with automatic fallback mirror if unavailable.',
-    adFree: true,
-    latencyMs: 65,
+    latencyMs: 85,
   },
   {
     id: 'videasy',
@@ -70,52 +70,52 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
     badge: 'Videasy',
     description: 'Smooth low-buffer stream with multi-language subtitles.',
     adFree: true,
-    latencyMs: 75,
+    latencyMs: 95,
   },
   {
-    id: 'vixsrc',
-    name: 'VixSrc HD',
-    tag: '4K · Multi-Audio',
-    badge: 'VixSrc',
-    description: '4K & HD multi-audio stream (may require direct region access if Cloudflare protected).',
-    adFree: true,
-    latencyMs: 90,
+    id: 'primesrc',
+    name: 'PrimeSrc Hosts',
+    tag: 'Backup · Host Captcha',
+    badge: 'PrimeSrc',
+    description: 'Manual multi-host mirror (external hosts may show verification ads).',
+    adFree: false,
+    latencyMs: 140,
   },
   {
     id: 'superembed',
     name: 'MultiEmbed',
-    tag: 'Backup',
+    tag: 'Backup · Shielded',
     badge: 'MultiEmbed',
     description: 'Worldwide multi-region backup stream mirror.',
-    adFree: false,
-    latencyMs: 135,
-  },
-  {
-    id: 'vidsrc_sh',
-    name: 'VidSrc Edge',
-    tag: 'Backup',
-    badge: 'VidSrc Edge',
-    description: 'Cloudflare edge backup mirror.',
     adFree: false,
     latencyMs: 155,
   },
   {
+    id: 'vidsrc_sh',
+    name: 'VidSrc Edge',
+    tag: 'Backup · Shielded',
+    badge: 'VidSrc Edge',
+    description: 'Cloudflare edge backup mirror.',
+    adFree: false,
+    latencyMs: 165,
+  },
+  {
     id: '2embed',
     name: '2Embed',
-    tag: 'Backup',
+    tag: 'Backup · Shielded',
     badge: '2Embed',
     description: 'Secondary mirror across older catalog titles.',
     adFree: false,
-    latencyMs: 170,
+    latencyMs: 175,
   },
   {
     id: 'vidsrc',
     name: 'VidSrc Pro',
-    tag: 'Backup',
+    tag: 'Backup · Shielded',
     badge: 'VidSrc Pro',
     description: 'Legacy IMDb/TMDB stream mirror.',
     adFree: false,
-    latencyMs: 185,
+    latencyMs: 190,
   },
 ];
 
@@ -127,15 +127,15 @@ export function isAdFreeServer(serverId: AnyServerId): boolean {
 
 export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
   const order: AnyServerId[] = [
-    'vidfast',
-    'primesrc',
     'vidlink',
-    'videasy',
+    'vidfast',
     'vixsrc',
-    'superembed',
-    'vidsrc_sh',
+    'videasy',
     '2embed',
+    'vidsrc_sh',
+    'superembed',
     'vidsrc',
+    'primesrc',
   ];
   const idx = order.indexOf(currentServer);
   if (idx === -1 || idx === order.length - 1) {
@@ -213,20 +213,20 @@ export interface VidLinkMediaDataEvent {
   data: Record<string, VidLinkMediaProgressEntry> | VidLinkMediaProgressEntry;
 }
 
-const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v10';
+const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v11';
 const STORAGE_KEY_RESUME_PREFIX = 'mullahmax_resume_sec_';
 export const STORAGE_KEY_VIDLINK_PROGRESS = 'vidLinkProgress';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
-  provider: 'vidfast',
-  vidukiServer: 'vidfast',
-  accentColor: 'B20710',
-  secondaryColor: '170000',
-  iconColor: 'EEFDEC',
-  icons: 'default',
+  provider: 'vidlink',
+  vidukiServer: 'vidlink',
+  accentColor: 'FFFFFF',
+  secondaryColor: '3F3F46',
+  iconColor: 'FFFFFF',
+  icons: 'vid',
   playerType: 'default',
   showTitle: false,
-  showPoster: true,
+  showPoster: false,
   autoplay: true,
   nextButton: true,
   preferredLang: '',
@@ -236,7 +236,7 @@ const DEFAULT_CONFIG: VideoProviderConfig = {
   animeFallback: true,
   adShieldEnabled: true,
   customTemplate:
-    'https://vidlink.pro/movie/{id}?primaryColor=B20710&secondaryColor=170000&iconColor=EEFDEC&icons=default&player=default&title=false&poster=true&autoplay=true&nextbutton=true',
+    'https://vidlink.pro/movie/{id}?primaryColor=FFFFFF&secondaryColor=3F3F46&iconColor=FFFFFF&icons=vid&player=default&title=false&poster=false&autoplay=true&nextbutton=true',
 };
 
 function sanitizeHexColor(raw: string | undefined, fallback: string): string {
