@@ -47,6 +47,10 @@ import {
 } from './services/tmdbService';
 import { getBecauseYouWatched } from './utils/recommendationEngine';
 import { installAdShield } from './utils/adBlocker';
+import {
+  getVidLinkProgressMap,
+  VidLinkMediaProgressEntry,
+} from './services/videoProviderService';
 
 function MainAppContent() {
   const { currentProfile, activeMood } = useProfile();
@@ -55,6 +59,20 @@ function MainAppContent() {
   // Install anti-ad shield on application boot
   useEffect(() => {
     installAdShield();
+  }, []);
+
+  const [vidLinkProgressMap, setVidLinkProgressMap] = useState<
+    Record<string, VidLinkMediaProgressEntry>
+  >(() => getVidLinkProgressMap());
+
+  useEffect(() => {
+    const syncProgress = () => setVidLinkProgressMap(getVidLinkProgressMap());
+    window.addEventListener('mullahmax:vidlink-progress', syncProgress);
+    window.addEventListener('storage', syncProgress);
+    return () => {
+      window.removeEventListener('mullahmax:vidlink-progress', syncProgress);
+      window.removeEventListener('storage', syncProgress);
+    };
   }, []);
 
   // Unified dynamic catalog (seeded with local offline-ready catalog + live TMDB feed)
@@ -108,17 +126,24 @@ function MainAppContent() {
   const [showSearch, setShowSearch] = useState(false);
   const [downloadToast, setDownloadToast] = useState<string | null>(null);
 
-  // Handler for playing media: auto-resumes where user left off if available, or opens player immediately
+  // Handler for playing media: auto-resumes where user left off (VidLink progress + Profile history)
   const handlePlayMedia = (media: MediaItem, seasonNum?: number, episodeNum?: number) => {
     let sNum = seasonNum;
     let eNum = episodeNum;
 
-    // Check if user has an existing progress to resume for this title
+    // Check VidLink Continue Watching progress first, then profile watchHistory
     if (media.type === 'series' && (!sNum || !eNum)) {
-      const historyItem = currentProfile.watchHistory.find((h) => h.mediaId === media.id);
-      if (historyItem && historyItem.season && historyItem.episode) {
-        sNum = historyItem.season;
-        eNum = historyItem.episode;
+      const vlEntry = media.tmdbId ? vidLinkProgressMap[String(media.tmdbId)] : undefined;
+      if (vlEntry?.last_season_watched && vlEntry?.last_episode_watched) {
+        sNum = parseInt(vlEntry.last_season_watched, 10) || sNum;
+        eNum = parseInt(vlEntry.last_episode_watched, 10) || eNum;
+      }
+      if (!sNum || !eNum) {
+        const historyItem = currentProfile.watchHistory.find((h) => h.mediaId === media.id);
+        if (historyItem && historyItem.season && historyItem.episode) {
+          sNum = historyItem.season;
+          eNum = historyItem.episode;
+        }
       }
     }
 
@@ -244,6 +269,63 @@ function MainAppContent() {
     return platformFilteredCatalog.filter((m) => m.type === 'series');
   }, [platformFilteredCatalog]);
 
+  const vidLinkContinueWatching = useMemo(() => {
+    const entries = Object.values(vidLinkProgressMap)
+      .filter((entry) => entry && entry.progress && entry.progress.duration > 0)
+      .sort((a, b) => (b.last_updated || 0) - (a.last_updated || 0))
+      .slice(0, 12);
+
+    return entries.map((entry) => {
+      const existing = catalog.find((m) => m.tmdbId === entry.id || m.id === String(entry.id));
+      const poster = entry.poster_path
+        ? entry.poster_path.startsWith('http')
+          ? entry.poster_path
+          : `https://image.tmdb.org/t/p/w500${entry.poster_path}`
+        : existing?.posterUrl || '';
+      const backdrop = entry.backdrop_path
+        ? entry.backdrop_path.startsWith('http')
+          ? entry.backdrop_path
+          : `https://image.tmdb.org/t/p/original${entry.backdrop_path}`
+        : existing?.backdropUrl || poster;
+
+      const mediaItem: MediaItem = existing || {
+        id: `tmdb-${entry.type === 'tv' ? 'tv' : 'movie'}-${entry.id}`,
+        tmdbId: entry.id,
+        title: entry.title || `Title #${entry.id}`,
+        type: entry.type === 'tv' ? 'series' : 'movie',
+        year: 2025,
+        rating: entry.type === 'tv' ? 'TV-14' : 'PG-13',
+        imdbScore: 0,
+        rottenTomatoesScore: 0,
+        duration: entry.type === 'tv' ? 'Series' : 'Feature',
+        genres: ['Drama'],
+        platforms: ['Netflix'],
+        primaryPlatform: 'Netflix',
+        description: '',
+        tagline: '',
+        cast: [],
+        posterUrl: poster,
+        backdropUrl: backdrop,
+        videoPreviewUrl: '',
+        audioTracks: ['English'],
+        subtitles: ['English'],
+        features: ['HD'],
+        moodTags: [],
+      };
+
+      const pct = Math.min(
+        100,
+        Math.max(1, Math.round((entry.progress.watched / entry.progress.duration) * 100))
+      );
+      const season = entry.last_season_watched ? parseInt(entry.last_season_watched, 10) || 1 : 1;
+      const episode = entry.last_episode_watched
+        ? parseInt(entry.last_episode_watched, 10) || 1
+        : 1;
+
+      return { media: mediaItem, pct, season, episode };
+    });
+  }, [vidLinkProgressMap, catalog]);
+
   return (
     <div className="min-h-screen bg-[#080A0F] text-slate-100 flex flex-col font-sans selection:bg-rose-600 selection:text-white">
       {/* Top Banner for Network/Offline state & simulated airplane mode toggle */}
@@ -298,6 +380,45 @@ function MainAppContent() {
               selectedPlatform={selectedPlatform}
               onSelectPlatform={setSelectedPlatform}
             />
+
+            {/* Continue Watching (Synced Live with VidLink MEDIA_DATA) */}
+            {vidLinkContinueWatching.length > 0 && (
+              <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl sm:text-2xl font-black text-white font-display tracking-tight">
+                    Continue Watching
+                  </h2>
+                </div>
+                <div className="flex gap-3.5 overflow-x-auto pb-2 no-scrollbar">
+                  {vidLinkContinueWatching.map(({ media, pct, season, episode }) => (
+                    <div
+                      key={`cw-${media.id}-${media.tmdbId || ''}`}
+                      className="shrink-0 w-40 sm:w-44 space-y-1.5"
+                    >
+                      <div className="relative">
+                        <MediaCard
+                          media={media}
+                          onSelect={setSelectedMedia}
+                          onPlay={(m) => handlePlayMedia(m, season, episode)}
+                          onDownload={(m) => setDownloadTarget({ media: m, seasonNum: season, episodeNum: episode })}
+                        />
+                        {media.type === 'series' && (
+                          <div className="pointer-events-none absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-bold text-white border border-white/15">
+                            S{season} E{episode}
+                          </div>
+                        )}
+                      </div>
+                      <div className="w-full h-1 rounded-full bg-white/15 overflow-hidden">
+                        <div
+                          className="h-full bg-rose-600 rounded-full transition-all"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Trending (Today | This Week) & Endless Category Cinema Rows */}
             <TrendingAndNewSection

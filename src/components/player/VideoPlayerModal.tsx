@@ -36,8 +36,13 @@ import {
   saveCustomDirectStream,
   LiveServerSourcesResponse,
   VixSrcPlayerEvent,
+  VidLinkMediaDataEvent,
+  VidLinkMediaProgressEntry,
   getSavedResumeSeconds,
   saveResumeSeconds,
+  getVidLinkResumeSeconds,
+  saveVidLinkMediaData,
+  isLikelyAnime,
 } from '../../services/videoProviderService';
 import { injectAdShieldIntoIframe, prewarmStreamUrl } from '../../utils/adBlocker';
 
@@ -108,13 +113,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [showControls, setShowControls] = useState(true);
   const [showEpisodeDrawer, setShowEpisodeDrawer] = useState(false);
 
-  // VixSrc customization state (primaryColor, secondaryColor, autoplay, startAt, lang)
+  // VidLink & VixSrc customization state
   const [providerCfg, setProviderCfg] = useState(() => getVideoProviderConfig());
-  const [startAtSeconds, setStartAtSeconds] = useState<number>(() =>
-    getSavedResumeSeconds(media.id, seasonNumber || 1, episodeNumber || 1)
-  );
+  const [startAtSeconds, setStartAtSeconds] = useState<number>(() => {
+    const localResume = getSavedResumeSeconds(media.id, seasonNumber || 1, episodeNumber || 1);
+    const vidLinkResume = getVidLinkResumeSeconds(media, seasonNumber || 1, episodeNumber || 1);
+    return Math.max(localResume, vidLinkResume);
+  });
   const [vixLiveTime, setVixLiveTime] = useState<number>(0);
   const [vixDuration, setVixDuration] = useState<number>(0);
+  const [useAnimeMode, setUseAnimeMode] = useState<boolean>(() => isLikelyAnime(media));
+  const [manualMalId, setManualMalId] = useState<string>(() =>
+    media.malId ? String(media.malId) : ''
+  );
 
   const controlsTimeoutRef = useRef<number | null>(null);
   const userManuallyPickedServerRef = useRef(false);
@@ -122,12 +133,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   // Sync saved startAt resume position when changing movie or episode
   useEffect(() => {
-    const saved = getSavedResumeSeconds(media.id, currentSeason, currentEpisode);
+    const localResume = getSavedResumeSeconds(media.id, currentSeason, currentEpisode);
+    const vidLinkResume = getVidLinkResumeSeconds(media, currentSeason, currentEpisode);
+    const saved = Math.max(localResume, vidLinkResume);
     setStartAtSeconds(saved);
     setVixLiveTime(saved);
     setVixDuration(0);
     lastSavedProgressSecRef.current = 0;
-  }, [media.id, currentSeason, currentEpisode]);
+  }, [media, currentSeason, currentEpisode]);
 
   // Probe live direct stream registry + VixSrc, PrimeSrc, VidFast availability & resolve TMDB/IMDb IDs
   useEffect(() => {
@@ -185,17 +198,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     (e) => e.episodeNumber === currentEpisode
   );
 
-  // Merge resolved TMDB & IMDb IDs for searched titles so all embed mirrors match accurately
+  // Merge resolved TMDB, IMDb & MAL IDs for searched titles so all embed mirrors match accurately
+  const parsedManualMalId = parseInt(manualMalId.trim(), 10);
+  const resolvedMalId =
+    Number.isFinite(parsedManualMalId) && parsedManualMalId > 0
+      ? parsedManualMalId
+      : liveSources?.resolvedMalId || media.malId;
+
   const resolvedMedia: MediaItem =
-    liveSources?.resolvedTmdbId || liveSources?.resolvedImdbId
+    liveSources?.resolvedTmdbId || liveSources?.resolvedImdbId || resolvedMalId
       ? {
           ...media,
-          tmdbId: liveSources.resolvedTmdbId || media.tmdbId,
-          imdbId: liveSources.resolvedImdbId || media.imdbId,
+          tmdbId: liveSources?.resolvedTmdbId || media.tmdbId,
+          imdbId: liveSources?.resolvedImdbId || media.imdbId,
+          malId: resolvedMalId,
         }
       : media;
 
-  // Generate stream source cleanly under the hood (including VixSrc customization params & resume startAt)
+  // Generate stream source cleanly under the hood (including full VidLink & VixSrc customization params)
   const activeStreamSource = generateStreamSource(
     resolvedMedia,
     currentSeason,
@@ -204,9 +224,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     {
       primaryColor: providerCfg.accentColor,
       secondaryColor: providerCfg.secondaryColor,
+      iconColor: providerCfg.iconColor,
+      icons: providerCfg.icons,
+      playerType: providerCfg.playerType,
+      showTitle: providerCfg.showTitle,
+      showPoster: providerCfg.showPoster,
       autoplay: providerCfg.autoplay,
+      nextButton: providerCfg.nextButton,
       lang: providerCfg.preferredLang,
+      subFile: providerCfg.subFile,
+      subLabel: providerCfg.subLabel,
       startAt: startAtSeconds,
+      malId: resolvedMalId,
+      animeSubOrDub: providerCfg.animeSubOrDub,
+      animeFallback: providerCfg.animeFallback,
+      useAnimeMode,
       adShieldEnabled: providerCfg.adShieldEnabled !== false,
     }
   );
@@ -262,18 +294,71 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     (currentSeason < allSeasons.length ||
       currentEpisode < (activeSeason?.episodes.length || 10));
 
-  // VixSrc Player Event Tracking via postMessage (play, pause, seeked, ended, timeupdate)
+  // VidLink MEDIA_DATA (localStorage['vidLinkProgress']) + PLAYER_EVENT tracking via postMessage
   useEffect(() => {
     const handlePlayerMessage = (event: MessageEvent) => {
-      if (event.origin && !event.origin.includes('vixsrc') && !event.origin.includes('vidlink') && !event.origin.includes('vidfast')) {
+      const origin = event.origin || '';
+      const isTrustedPlayerOrigin =
+        origin === 'https://vidlink.pro' ||
+        origin.includes('vixsrc') ||
+        origin.includes('vidfast');
+      if (origin && !isTrustedPlayerOrigin) {
         return;
       }
-      const payload = event.data as Partial<VixSrcPlayerEvent> | null;
-      if (!payload || payload.type !== 'PLAYER_EVENT' || !payload.data) return;
 
-      const { event: playerEvent, currentTime: evTime, duration: evDur } = payload.data;
+      const rawData = event.data as
+        | Partial<VixSrcPlayerEvent>
+        | Partial<VidLinkMediaDataEvent>
+        | null;
+      if (!rawData || typeof rawData !== 'object') return;
+
+      // 1. VidLink Continue Watching MEDIA_DATA persistence (saved into localStorage['vidLinkProgress'])
+      if (rawData.type === 'MEDIA_DATA' && rawData.data) {
+        saveVidLinkMediaData(rawData.data);
+
+        const dataObj = rawData.data as
+          | VidLinkMediaProgressEntry
+          | Record<string, VidLinkMediaProgressEntry>;
+        const targetKey = resolvedMedia.tmdbId ? String(resolvedMedia.tmdbId) : '';
+        const matchedEntry: VidLinkMediaProgressEntry | undefined =
+          'progress' in dataObj && dataObj.progress
+            ? (dataObj as VidLinkMediaProgressEntry)
+            : (targetKey
+                ? (dataObj as Record<string, VidLinkMediaProgressEntry>)[targetKey]
+                : undefined) || Object.values(dataObj as Record<string, VidLinkMediaProgressEntry>)[0];
+
+        if (matchedEntry?.progress?.duration && matchedEntry.progress.duration > 0) {
+          const watched = matchedEntry.progress.watched || 0;
+          const dur = matchedEntry.progress.duration;
+          const pct = Math.min(99, Math.max(1, Math.round((watched / dur) * 100)));
+          const sNum = matchedEntry.last_season_watched
+            ? parseInt(matchedEntry.last_season_watched, 10) || currentSeason
+            : currentSeason;
+          const eNum = matchedEntry.last_episode_watched
+            ? parseInt(matchedEntry.last_episode_watched, 10) || currentEpisode
+            : currentEpisode;
+          if (watched > 5) {
+            saveResumeSeconds(media.id, watched, sNum, eNum);
+          }
+          updateWatchProgress(media.id, pct, sNum, eNum);
+        }
+        return;
+      }
+
+      // 2. VidLink & VixSrc PLAYER_EVENT lifecycle tracking (play, pause, seeked, ended, timeupdate)
+      if (rawData.type !== 'PLAYER_EVENT' || !rawData.data) return;
+
+      const {
+        event: playerEvent,
+        currentTime: evTime,
+        duration: evDur,
+        season: evSeason,
+        episode: evEpisode,
+      } = rawData.data;
       const curSec = typeof evTime === 'number' && Number.isFinite(evTime) ? evTime : 0;
       const totalSec = typeof evDur === 'number' && Number.isFinite(evDur) ? evDur : 0;
+      const effSeason = typeof evSeason === 'number' && evSeason > 0 ? evSeason : currentSeason;
+      const effEpisode = typeof evEpisode === 'number' && evEpisode > 0 ? evEpisode : currentEpisode;
 
       if (curSec > 0) setVixLiveTime(curSec);
       if (totalSec > 0) setVixDuration(totalSec);
@@ -284,26 +369,26 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       } else if (playerEvent === 'pause' || playerEvent === 'seeked') {
         if (playerEvent === 'pause') setIsPlaying(false);
         if (curSec > 5) {
-          saveResumeSeconds(media.id, curSec, currentSeason, currentEpisode);
+          saveResumeSeconds(media.id, curSec, effSeason, effEpisode);
           if (totalSec > 0) {
             const pct = Math.min(99, Math.round((curSec / totalSec) * 100));
-            updateWatchProgress(media.id, pct, currentSeason, currentEpisode);
+            updateWatchProgress(media.id, pct, effSeason, effEpisode);
           }
         }
       } else if (playerEvent === 'timeupdate') {
         setIsPlaying(true);
         if (curSec > 5 && Math.abs(curSec - lastSavedProgressSecRef.current) >= 5) {
           lastSavedProgressSecRef.current = curSec;
-          saveResumeSeconds(media.id, curSec, currentSeason, currentEpisode);
+          saveResumeSeconds(media.id, curSec, effSeason, effEpisode);
           if (totalSec > 0) {
             const pct = Math.min(99, Math.round((curSec / totalSec) * 100));
-            updateWatchProgress(media.id, pct, currentSeason, currentEpisode);
+            updateWatchProgress(media.id, pct, effSeason, effEpisode);
           }
         }
       } else if (playerEvent === 'ended') {
         setIsPlaying(false);
-        saveResumeSeconds(media.id, 0, currentSeason, currentEpisode);
-        updateWatchProgress(media.id, 100, currentSeason, currentEpisode);
+        saveResumeSeconds(media.id, 0, effSeason, effEpisode);
+        updateWatchProgress(media.id, 100, effSeason, effEpisode);
         if (media.type === 'series' && hasNextEpisode) {
           handleNavigateEpisode(1);
         }
@@ -312,7 +397,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     window.addEventListener('message', handlePlayerMessage);
     return () => window.removeEventListener('message', handlePlayerMessage);
-  }, [media.id, media.type, currentSeason, currentEpisode, hasNextEpisode, updateWatchProgress]);
+  }, [media.id, media.type, resolvedMedia.tmdbId, currentSeason, currentEpisode, hasNextEpisode, updateWatchProgress]);
 
   const updateCustomization = (patch: Partial<typeof providerCfg>, reloadFrame = true) => {
     const next = { ...providerCfg, ...patch };
@@ -844,7 +929,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </button>
 
             {showSourceMenu && (
-              <div className="absolute top-full right-0 mt-2 w-80 rounded-2xl bg-[#0D111A]/95 border border-white/15 p-3 shadow-2xl backdrop-blur-2xl z-50 text-slate-200 space-y-2">
+              <div className="absolute top-full right-0 mt-2 w-[22rem] max-h-[82vh] overflow-y-auto rounded-2xl bg-[#0D111A]/95 border border-white/15 p-3 shadow-2xl backdrop-blur-2xl z-50 text-slate-200 space-y-2.5 no-scrollbar">
                 <div className="flex items-center justify-between px-1 pb-1.5 border-b border-white/10">
                   <span className="text-xs font-bold text-white">Streaming Servers</span>
                   <div className="flex items-center gap-2">
@@ -868,7 +953,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   </div>
                 </div>
 
-                <div className="max-h-72 overflow-y-auto space-y-1 no-scrollbar">
+                <div className="max-h-52 overflow-y-auto space-y-1 no-scrollbar">
                   {VIDUKI_SERVERS.map((server) => {
                     const isSelected = selectedServer === server.id && playerMode === 'stream';
                     const primeHosts = liveSources?.primeSrcHosts || [];
@@ -915,35 +1000,52 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   })}
                 </div>
 
-                {/* VixSrc Player Customization (lang, autoplay, primaryColor/secondaryColor) */}
+                {/* VidLink & VixSrc Full Customization Parameters */}
                 <div className="pt-2 border-t border-white/10 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-semibold text-slate-300">
-                      Audio Language (lang)
+                      Player Engine &amp; Icons
                     </span>
-                    <select
-                      value={providerCfg.preferredLang}
-                      onChange={(e) => updateCustomization({ preferredLang: e.target.value })}
-                      className="bg-black/60 border border-white/15 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-rose-500 cursor-pointer"
-                    >
-                      <option value="">Auto / Default</option>
-                      <option value="en">English (en)</option>
-                      <option value="it">Italian (it)</option>
-                      <option value="es">Spanish (es)</option>
-                      <option value="fr">French (fr)</option>
-                      <option value="de">German (de)</option>
-                    </select>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={providerCfg.playerType}
+                        onChange={(e) =>
+                          updateCustomization({
+                            playerType: e.target.value === 'jw' ? 'jw' : 'default',
+                          })
+                        }
+                        className="bg-black/60 border border-white/15 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none focus:border-rose-500 cursor-pointer"
+                        title="VidLink player engine"
+                      >
+                        <option value="default">VidLink Default</option>
+                        <option value="jw">JW Player</option>
+                      </select>
+                      <select
+                        value={providerCfg.icons}
+                        onChange={(e) =>
+                          updateCustomization({
+                            icons: e.target.value === 'vid' ? 'vid' : 'default',
+                          })
+                        }
+                        className="bg-black/60 border border-white/15 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none focus:border-rose-500 cursor-pointer"
+                        title="Player icons style"
+                      >
+                        <option value="default">Default Icons</option>
+                        <option value="vid">Vid Icons</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-semibold text-slate-300">
-                      Autoplay &amp; Theme Color
+                      Colors (Primary · Sec · Icon)
                     </span>
                     <div className="flex items-center gap-1.5">
                       {[
-                        { label: 'Crimson', primary: 'B20710', secondary: '170000' },
-                        { label: 'Rose', primary: 'E11D48', secondary: '19060D' },
-                        { label: 'Blue', primary: '2563EB', secondary: '0A1128' },
+                        { label: 'Crimson', primary: 'B20710', secondary: '170000', icon: 'FFFFFF' },
+                        { label: 'Teal', primary: '63B8BC', secondary: 'A2A2A2', icon: 'EEFDEC' },
+                        { label: 'Rose', primary: 'E11D48', secondary: '19060D', icon: 'FFE4E6' },
+                        { label: 'Blue', primary: '2563EB', secondary: '0A1128', icon: 'DBEAFE' },
                       ].map((preset) => {
                         const activeColor =
                           providerCfg.accentColor.toUpperCase() === preset.primary.toUpperCase();
@@ -956,9 +1058,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                               updateCustomization({
                                 accentColor: preset.primary,
                                 secondaryColor: preset.secondary,
+                                iconColor: preset.icon,
                               })
                             }
-                            className={`w-5 h-5 rounded-full border transition-transform cursor-pointer ${
+                            className={`w-4 h-4 rounded-full border transition-transform cursor-pointer ${
                               activeColor
                                 ? 'border-white scale-110'
                                 : 'border-white/20 opacity-75 hover:opacity-100'
@@ -967,25 +1070,83 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                           />
                         );
                       })}
-                      <button
-                        type="button"
-                        onClick={() => updateCustomization({ autoplay: !providerCfg.autoplay })}
-                        className={`ml-1 px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
-                          providerCfg.autoplay
-                            ? 'bg-rose-600/30 border-rose-500 text-rose-200'
-                            : 'bg-white/5 border-white/15 text-slate-400'
-                        }`}
-                      >
-                        {providerCfg.autoplay ? 'Autoplay On' : 'Autoplay Off'}
-                      </button>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between pt-0.5">
-                    <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
-                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                      Redirect Ad Shield (JS)
-                    </span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <label className="flex flex-col gap-0.5 text-[10px] text-slate-400">
+                      <span>Primary #</span>
+                      <input
+                        type="text"
+                        maxLength={7}
+                        defaultValue={providerCfg.accentColor}
+                        onBlur={(e) => updateCustomization({ accentColor: e.target.value })}
+                        className="bg-black/50 border border-white/15 rounded-md px-2 py-1 text-[11px] font-mono text-white focus:outline-none focus:border-rose-500 uppercase"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-0.5 text-[10px] text-slate-400">
+                      <span>Secondary #</span>
+                      <input
+                        type="text"
+                        maxLength={7}
+                        defaultValue={providerCfg.secondaryColor}
+                        onBlur={(e) => updateCustomization({ secondaryColor: e.target.value })}
+                        className="bg-black/50 border border-white/15 rounded-md px-2 py-1 text-[11px] font-mono text-white focus:outline-none focus:border-rose-500 uppercase"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-0.5 text-[10px] text-slate-400">
+                      <span>Icon #</span>
+                      <input
+                        type="text"
+                        maxLength={7}
+                        defaultValue={providerCfg.iconColor}
+                        onBlur={(e) => updateCustomization({ iconColor: e.target.value })}
+                        className="bg-black/50 border border-white/15 rounded-md px-2 py-1 text-[11px] font-mono text-white focus:outline-none focus:border-rose-500 uppercase"
+                      />
+                    </label>
+                  </div>
+
+                  {/* VidLink Player Feature Toggles */}
+                  <div className="grid grid-cols-4 gap-1">
+                    {[
+                      { key: 'autoplay', label: 'Autoplay', val: providerCfg.autoplay },
+                      { key: 'showTitle', label: 'Title', val: providerCfg.showTitle },
+                      { key: 'showPoster', label: 'Poster', val: providerCfg.showPoster },
+                      { key: 'nextButton', label: 'Next Ep', val: providerCfg.nextButton },
+                    ].map((opt) => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() =>
+                          updateCustomization({ [opt.key]: !opt.val } as Partial<typeof providerCfg>)
+                        }
+                        className={`px-1.5 py-1 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+                          opt.val
+                            ? 'bg-rose-600/25 border-rose-500 text-rose-200'
+                            : 'bg-white/5 border-white/10 text-slate-400'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Audio Language + Redirect Ad Shield */}
+                  <div className="flex items-center justify-between gap-2">
+                    <select
+                      value={providerCfg.preferredLang}
+                      onChange={(e) => updateCustomization({ preferredLang: e.target.value })}
+                      className="bg-black/60 border border-white/15 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none focus:border-rose-500 cursor-pointer"
+                      title="Audio language"
+                    >
+                      <option value="">Audio: Auto</option>
+                      <option value="en">English (en)</option>
+                      <option value="it">Italian (it)</option>
+                      <option value="es">Spanish (es)</option>
+                      <option value="fr">French (fr)</option>
+                      <option value="de">German (de)</option>
+                    </select>
+
                     <button
                       type="button"
                       onClick={() =>
@@ -993,14 +1154,111 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                           adShieldEnabled: providerCfg.adShieldEnabled === false,
                         })
                       }
-                      className={`px-2.5 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
+                      className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer flex items-center gap-1 ${
                         providerCfg.adShieldEnabled !== false
                           ? 'bg-emerald-600/25 border-emerald-500/60 text-emerald-200'
                           : 'bg-white/5 border-white/15 text-slate-400'
                       }`}
                     >
-                      {providerCfg.adShieldEnabled !== false ? 'Active' : 'Off'}
+                      <ShieldCheck className="w-3 h-3" />
+                      Ad Shield {providerCfg.adShieldEnabled !== false ? 'On' : 'Off'}
                     </button>
+                  </div>
+
+                  {/* VidLink Anime (MAL ID) Support */}
+                  <div className="pt-1.5 border-t border-white/10 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-slate-300">
+                        Anime Stream (MAL)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUseAnimeMode(!useAnimeMode);
+                          setIframeLoaded(false);
+                          setIframeKey((k) => k + 1);
+                        }}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border cursor-pointer ${
+                          useAnimeMode
+                            ? 'bg-amber-500/25 border-amber-400/60 text-amber-200'
+                            : 'bg-white/5 border-white/15 text-slate-400'
+                        }`}
+                      >
+                        {useAnimeMode ? 'Anime Mode On' : 'Off'}
+                      </button>
+                    </div>
+                    {useAnimeMode && (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min={1}
+                          value={manualMalId || (resolvedMalId ? String(resolvedMalId) : '')}
+                          onChange={(e) => setManualMalId(e.target.value)}
+                          onBlur={() => {
+                            setIframeLoaded(false);
+                            setIframeKey((k) => k + 1);
+                          }}
+                          placeholder="MAL ID (e.g. 16498)"
+                          className="flex-1 min-w-0 bg-black/50 border border-white/15 rounded-lg px-2 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateCustomization({
+                              animeSubOrDub: providerCfg.animeSubOrDub === 'sub' ? 'dub' : 'sub',
+                            })
+                          }
+                          className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-[10px] font-bold uppercase text-white cursor-pointer"
+                        >
+                          {providerCfg.animeSubOrDub}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateCustomization({ animeFallback: !providerCfg.animeFallback })
+                          }
+                          title="Auto fallback between Sub & Dub"
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold border cursor-pointer ${
+                            providerCfg.animeFallback
+                              ? 'bg-rose-600/25 border-rose-500 text-rose-200'
+                              : 'bg-white/5 border-white/10 text-slate-400'
+                          }`}
+                        >
+                          Fallback
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* External VTT Subtitle Injection (sub_file & sub_label) */}
+                  <div className="pt-1.5 border-t border-white/10 space-y-1">
+                    <span className="text-[10px] font-semibold text-slate-400 block">
+                      External Subtitles (.vtt URL &amp; Label)
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="url"
+                        defaultValue={providerCfg.subFile}
+                        onBlur={(e) => {
+                          if (e.target.value.trim() !== providerCfg.subFile) {
+                            updateCustomization({ subFile: e.target.value.trim() });
+                          }
+                        }}
+                        placeholder="https://.../subtitles.vtt"
+                        className="flex-1 min-w-0 bg-black/50 border border-white/15 rounded-lg px-2 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                      />
+                      <input
+                        type="text"
+                        defaultValue={providerCfg.subLabel}
+                        onBlur={(e) => {
+                          if (e.target.value.trim() !== providerCfg.subLabel) {
+                            updateCustomization({ subLabel: e.target.value.trim() });
+                          }
+                        }}
+                        placeholder="Label"
+                        className="w-20 bg-black/50 border border-white/15 rounded-lg px-2 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                      />
+                    </div>
                   </div>
                 </div>
 

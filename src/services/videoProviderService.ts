@@ -144,13 +144,27 @@ export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
   return order[idx + 1];
 }
 
+export type VidLinkIconsStyle = 'default' | 'vid';
+export type VidLinkPlayerType = 'default' | 'jw';
+export type VidLinkAnimeAudioType = 'sub' | 'dub';
+
 export interface VideoProviderConfig {
   provider: VideoStreamProvider;
   vidukiServer: AnyServerId;
-  accentColor: string; // hex color without # (e.g. B20710)
-  secondaryColor: string; // hex color without # (default: 170000)
+  accentColor: string; // hex color without # (e.g. B20710 or 63b8bc)
+  secondaryColor: string; // hex color without # (default: 170000 or a2a2a2)
+  iconColor: string; // hex color without # (e.g. eefdec or B20710)
+  icons: VidLinkIconsStyle; // 'default' | 'vid'
+  playerType: VidLinkPlayerType; // 'default' | 'jw'
+  showTitle: boolean;
+  showPoster: boolean;
   autoplay: boolean;
+  nextButton: boolean;
   preferredLang: string; // e.g. '' (auto) | 'en' | 'it' | 'es' | 'fr' | 'de'
+  subFile: string; // optional VTT URL
+  subLabel: string; // defaults to 'External Subtitle'
+  animeSubOrDub: VidLinkAnimeAudioType; // 'sub' | 'dub'
+  animeFallback: boolean; // ?fallback=true
   adShieldEnabled: boolean;
   customTemplate: string;
 }
@@ -161,28 +175,85 @@ export interface VixSrcPlayerEvent {
     event: 'play' | 'pause' | 'seeked' | 'ended' | 'timeupdate';
     currentTime: number;
     duration: number;
-    video_id: number;
+    video_id?: number;
+    mtmdbId?: number;
+    mediaType?: 'movie' | 'tv';
+    season?: number;
+    episode?: number;
   };
+}
+
+export interface VidLinkEpisodeProgress {
+  season: string;
+  episode: string;
+  progress: {
+    watched: number;
+    duration: number;
+  };
+}
+
+export interface VidLinkMediaProgressEntry {
+  id: number;
+  type: 'movie' | 'tv' | 'anime';
+  title: string;
+  poster_path?: string | null;
+  backdrop_path?: string | null;
+  progress: {
+    watched: number;
+    duration: number;
+  };
+  last_season_watched?: string;
+  last_episode_watched?: string;
+  show_progress?: Record<string, VidLinkEpisodeProgress>;
+  last_updated?: number;
+}
+
+export interface VidLinkMediaDataEvent {
+  type: 'MEDIA_DATA';
+  data: Record<string, VidLinkMediaProgressEntry> | VidLinkMediaProgressEntry;
 }
 
 const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v10';
 const STORAGE_KEY_RESUME_PREFIX = 'mullahmax_resume_sec_';
+export const STORAGE_KEY_VIDLINK_PROGRESS = 'vidLinkProgress';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
   provider: 'vidfast',
   vidukiServer: 'vidfast',
   accentColor: 'B20710',
   secondaryColor: '170000',
+  iconColor: 'EEFDEC',
+  icons: 'default',
+  playerType: 'default',
+  showTitle: false,
+  showPoster: true,
   autoplay: true,
+  nextButton: true,
   preferredLang: '',
+  subFile: '',
+  subLabel: 'External Subtitle',
+  animeSubOrDub: 'sub',
+  animeFallback: true,
   adShieldEnabled: true,
   customTemplate:
-    'https://vixsrc.to/movie/{id}?primaryColor=B20710&secondaryColor=170000&autoplay=true',
+    'https://vidlink.pro/movie/{id}?primaryColor=B20710&secondaryColor=170000&iconColor=EEFDEC&icons=default&player=default&title=false&poster=true&autoplay=true&nextbutton=true',
 };
 
 function sanitizeHexColor(raw: string | undefined, fallback: string): string {
   const cleaned = (raw || '').replace(/#/g, '').trim();
   return /^[0-9a-fA-F]{3,8}$/.test(cleaned) ? cleaned : fallback;
+}
+
+function sanitizeHttpUrl(raw: string | undefined): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.toString();
+    }
+  } catch {}
+  return '';
 }
 
 export function getVideoProviderConfig(): VideoProviderConfig {
@@ -201,8 +272,24 @@ export function getVideoProviderConfig(): VideoProviderConfig {
         vidukiServer: savedServer,
         accentColor: sanitizeHexColor(parsed.accentColor, DEFAULT_CONFIG.accentColor),
         secondaryColor: sanitizeHexColor(parsed.secondaryColor, DEFAULT_CONFIG.secondaryColor),
+        iconColor: sanitizeHexColor(parsed.iconColor, DEFAULT_CONFIG.iconColor),
+        icons: parsed.icons === 'vid' ? 'vid' : 'default',
+        playerType: parsed.playerType === 'jw' ? 'jw' : 'default',
+        showTitle: typeof parsed.showTitle === 'boolean' ? parsed.showTitle : DEFAULT_CONFIG.showTitle,
+        showPoster: typeof parsed.showPoster === 'boolean' ? parsed.showPoster : DEFAULT_CONFIG.showPoster,
         autoplay: typeof parsed.autoplay === 'boolean' ? parsed.autoplay : DEFAULT_CONFIG.autoplay,
+        nextButton: typeof parsed.nextButton === 'boolean' ? parsed.nextButton : DEFAULT_CONFIG.nextButton,
         preferredLang: typeof parsed.preferredLang === 'string' ? parsed.preferredLang : '',
+        subFile: sanitizeHttpUrl(parsed.subFile),
+        subLabel:
+          typeof parsed.subLabel === 'string' && parsed.subLabel.trim()
+            ? parsed.subLabel.trim().slice(0, 48)
+            : DEFAULT_CONFIG.subLabel,
+        animeSubOrDub: parsed.animeSubOrDub === 'dub' ? 'dub' : 'sub',
+        animeFallback:
+          typeof parsed.animeFallback === 'boolean'
+            ? parsed.animeFallback
+            : DEFAULT_CONFIG.animeFallback,
         adShieldEnabled:
           typeof parsed.adShieldEnabled === 'boolean'
             ? parsed.adShieldEnabled
@@ -222,12 +309,116 @@ export function saveVideoProviderConfig(config: VideoProviderConfig) {
       vidukiServer: validServer,
       accentColor: sanitizeHexColor(config.accentColor, DEFAULT_CONFIG.accentColor),
       secondaryColor: sanitizeHexColor(config.secondaryColor, DEFAULT_CONFIG.secondaryColor),
+      iconColor: sanitizeHexColor(config.iconColor, DEFAULT_CONFIG.iconColor),
+      icons: config.icons === 'vid' ? 'vid' : 'default',
+      playerType: config.playerType === 'jw' ? 'jw' : 'default',
+      showTitle: Boolean(config.showTitle),
+      showPoster: Boolean(config.showPoster),
       autoplay: Boolean(config.autoplay),
+      nextButton: Boolean(config.nextButton),
       preferredLang: (config.preferredLang || '').trim(),
+      subFile: sanitizeHttpUrl(config.subFile),
+      subLabel: (config.subLabel || '').trim().slice(0, 48) || DEFAULT_CONFIG.subLabel,
+      animeSubOrDub: config.animeSubOrDub === 'dub' ? 'dub' : 'sub',
+      animeFallback: config.animeFallback !== false,
       adShieldEnabled: config.adShieldEnabled !== false,
     };
     localStorage.setItem(STORAGE_KEY_PROVIDER, JSON.stringify(cleaned));
   } catch {}
+}
+
+export function getVidLinkProgressMap(): Record<string, VidLinkMediaProgressEntry> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_VIDLINK_PROGRESS);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, VidLinkMediaProgressEntry>;
+    }
+  } catch {}
+  return {};
+}
+
+export function saveVidLinkMediaData(
+  incoming: VidLinkMediaProgressEntry | Record<string, VidLinkMediaProgressEntry>
+): Record<string, VidLinkMediaProgressEntry> {
+  const existing = getVidLinkProgressMap();
+  if (!incoming || typeof incoming !== 'object') return existing;
+
+  const isSingleEntry =
+    'id' in incoming &&
+    (typeof (incoming as VidLinkMediaProgressEntry).id === 'number' ||
+      typeof (incoming as VidLinkMediaProgressEntry).id === 'string') &&
+    'progress' in incoming;
+
+  const merged: Record<string, VidLinkMediaProgressEntry> = { ...existing };
+
+  if (isSingleEntry) {
+    const entry = incoming as VidLinkMediaProgressEntry;
+    const key = String(entry.id);
+    const prev = merged[key];
+    merged[key] = {
+      ...prev,
+      ...entry,
+      show_progress: {
+        ...(prev?.show_progress || {}),
+        ...(entry.show_progress || {}),
+      },
+      last_updated: entry.last_updated || Date.now(),
+    };
+  } else {
+    for (const [key, entry] of Object.entries(
+      incoming as Record<string, VidLinkMediaProgressEntry>
+    )) {
+      if (!entry || typeof entry !== 'object') continue;
+      const prev = merged[key];
+      merged[key] = {
+        ...prev,
+        ...entry,
+        show_progress: {
+          ...(prev?.show_progress || {}),
+          ...(entry.show_progress || {}),
+        },
+        last_updated: entry.last_updated || prev?.last_updated || Date.now(),
+      };
+    }
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEY_VIDLINK_PROGRESS, JSON.stringify(merged));
+    window.dispatchEvent(new CustomEvent('mullahmax:vidlink-progress', { detail: merged }));
+  } catch {}
+
+  return merged;
+}
+
+export function getVidLinkResumeSeconds(media: MediaItem, season = 1, episode = 1): number {
+  const map = getVidLinkProgressMap();
+  const keysToTry = [media.tmdbId ? String(media.tmdbId) : '', resolveTargetIdentifier(media)].filter(
+    Boolean
+  );
+  for (const key of keysToTry) {
+    const entry = map[key];
+    if (!entry) continue;
+    if (media.type === 'series' && entry.show_progress) {
+      const epProgress = entry.show_progress[`s${season}e${episode}`]?.progress?.watched;
+      if (typeof epProgress === 'number' && epProgress > 5) {
+        return Math.floor(epProgress);
+      }
+    }
+    if (typeof entry.progress?.watched === 'number' && entry.progress.watched > 5) {
+      return Math.floor(entry.progress.watched);
+    }
+  }
+  return 0;
+}
+
+export function isLikelyAnime(media: MediaItem): boolean {
+  if (media.malId && media.malId > 0) return true;
+  if (media.platforms.includes('Crunchyroll')) return true;
+  if (media.aliases?.some((a) => /anime/i.test(a))) return true;
+  return false;
 }
 
 export function getSavedResumeSeconds(mediaId: string, season = 1, episode = 1): number {
@@ -298,10 +489,95 @@ export interface StreamSourceResult {
 export interface StreamCustomizationOptions {
   primaryColor?: string;
   secondaryColor?: string;
+  iconColor?: string;
+  icons?: VidLinkIconsStyle;
+  playerType?: VidLinkPlayerType;
+  showTitle?: boolean;
+  showPoster?: boolean;
   autoplay?: boolean;
+  nextButton?: boolean;
   startAt?: number;
   lang?: string;
+  subFile?: string;
+  subLabel?: string;
+  malId?: number;
+  animeSubOrDub?: VidLinkAnimeAudioType;
+  animeFallback?: boolean;
+  useAnimeMode?: boolean;
   adShieldEnabled?: boolean;
+}
+
+export function buildVidLinkEmbedUrl(
+  media: MediaItem,
+  id: string,
+  season = 1,
+  episode = 1,
+  opts: StreamCustomizationOptions = {}
+): string {
+  const cfg = getVideoProviderConfig();
+  const primaryColor = sanitizeHexColor(opts.primaryColor ?? cfg.accentColor, 'B20710');
+  const secondaryColor = sanitizeHexColor(opts.secondaryColor ?? cfg.secondaryColor, '170000');
+  const iconColor = sanitizeHexColor(opts.iconColor ?? cfg.iconColor, 'EEFDEC');
+  const icons: VidLinkIconsStyle = opts.icons ?? cfg.icons ?? 'default';
+  const player: VidLinkPlayerType = opts.playerType ?? cfg.playerType ?? 'default';
+  const title = opts.showTitle ?? cfg.showTitle ?? false;
+  const poster = opts.showPoster ?? cfg.showPoster ?? true;
+  const autoplay = opts.autoplay ?? cfg.autoplay ?? true;
+  const nextbutton = opts.nextButton ?? cfg.nextButton ?? true;
+  const startAt =
+    typeof opts.startAt === 'number' && opts.startAt > 5 ? Math.floor(opts.startAt) : 0;
+  const subFile = sanitizeHttpUrl(opts.subFile ?? cfg.subFile);
+  const subLabel = (opts.subLabel ?? cfg.subLabel ?? 'External Subtitle').trim();
+  const subOrDub: VidLinkAnimeAudioType = opts.animeSubOrDub ?? cfg.animeSubOrDub ?? 'sub';
+  const animeFallback = opts.animeFallback ?? cfg.animeFallback ?? true;
+
+  const sNum = Math.max(1, season);
+  const epNum = Math.max(1, episode);
+  const resolvedMalId = opts.malId && opts.malId > 0 ? opts.malId : media.malId;
+  const shouldUseAnimeEndpoint =
+    Boolean(resolvedMalId && resolvedMalId > 0) && (opts.useAnimeMode ?? isLikelyAnime(media));
+
+  const fallbackTargetUrl =
+    media.type === 'series'
+      ? `https://vidfast.pro/tv/${id}/${sNum}/${epNum}?autoPlay=${autoplay}&theme=${primaryColor}&nextButton=${nextbutton}&title=${title}`
+      : `https://vidfast.pro/movie/${id}?autoPlay=${autoplay}&theme=${primaryColor}&title=${title}`;
+
+  let basePath: string;
+  if (shouldUseAnimeEndpoint && resolvedMalId) {
+    basePath = `https://vidlink.pro/anime/${resolvedMalId}/${epNum}/${subOrDub}`;
+  } else if (media.type === 'series') {
+    basePath = `https://vidlink.pro/tv/${id}/${sNum}/${epNum}`;
+  } else {
+    basePath = `https://vidlink.pro/movie/${id}`;
+  }
+
+  const params = new URLSearchParams();
+  if (shouldUseAnimeEndpoint && animeFallback) {
+    params.set('fallback', 'true');
+  }
+  params.set('primaryColor', primaryColor);
+  params.set('secondaryColor', secondaryColor);
+  params.set('iconColor', iconColor);
+  params.set('icons', icons);
+  params.set('player', player);
+  params.set('title', String(title));
+  params.set('poster', String(poster));
+  params.set('autoplay', String(autoplay));
+  if (media.type === 'series' || shouldUseAnimeEndpoint) {
+    params.set('nextbutton', String(nextbutton));
+  }
+  if (startAt > 0) {
+    params.set('startAt', String(startAt));
+  }
+  if (subFile) {
+    params.set('sub_file', subFile);
+    if (subLabel) {
+      params.set('sub_label', subLabel);
+    }
+  }
+  params.set('fallback_url', fallbackTargetUrl);
+
+  return `${basePath}?${params.toString()}`;
 }
 
 export function buildVixSrcEmbedUrl(
@@ -338,8 +614,8 @@ export function buildVixSrcEmbedUrl(
 }
 
 /**
- * Constructs the stream URL for any selected movie or series, defaulting to
- * VixSrc with full customization parameters (primaryColor, secondaryColor, autoplay, startAt, lang).
+ * Constructs the stream URL for any selected movie, show, or anime across
+ * VidLink (full API params + Anime MAL support), VidFast, PrimeSrc, Videasy, VixSrc, and shielded mirrors.
  */
 export function generateStreamSource(
   media: MediaItem,
@@ -352,28 +628,15 @@ export function generateStreamSource(
   const targetId = resolveTargetIdentifier(media);
   const imdbFallback = media.imdbId || (targetId.startsWith('tt') ? targetId : 'tt15239678');
   const color = sanitizeHexColor(customization?.primaryColor ?? cfg.accentColor, 'B20710');
-  const secondaryColor = sanitizeHexColor(
-    customization?.secondaryColor ?? cfg.secondaryColor,
-    '170000'
-  );
   const sNum = Math.max(1, season);
   const epNum = Math.max(1, episode);
 
-  const requestedServer = overrideServer ?? cfg.vidukiServer ?? 'vixsrc';
-  const server: AnyServerId = VALID_SERVER_IDS.has(requestedServer) ? requestedServer : 'vixsrc';
+  const requestedServer = overrideServer ?? cfg.vidukiServer ?? 'vidfast';
+  const server: AnyServerId = VALID_SERVER_IDS.has(requestedServer) ? requestedServer : 'vidfast';
 
-  const vidfastFallbackUrl =
-    media.type === 'series'
-      ? `https://vidfast.pro/tv/${targetId}/${sNum}/${epNum}?autoPlay=true&theme=${color}&nextButton=true&title=false`
-      : `https://vidfast.pro/movie/${targetId}?autoPlay=true&theme=${color}&title=false`;
-
-  // 1. VidLink Pro
+  // 1. VidLink Pro (Full Movies, TV & Anime MAL API + Customization + Watch Progress)
   if (server === 'vidlink') {
-    const encodedFallback = encodeURIComponent(vidfastFallbackUrl);
-    const url =
-      media.type === 'series'
-        ? `https://vidlink.pro/tv/${targetId}/${sNum}/${epNum}?primaryColor=${color}&secondaryColor=${secondaryColor}&iconColor=${color}&autoplay=true&title=false&poster=true&nextbutton=true&fallback_url=${encodedFallback}`
-        : `https://vidlink.pro/movie/${targetId}?primaryColor=${color}&secondaryColor=${secondaryColor}&iconColor=${color}&autoplay=true&title=false&poster=true&fallback_url=${encodedFallback}`;
+    const url = buildVidLinkEmbedUrl(media, targetId, sNum, epNum, customization);
     return {
       type: 'iframe',
       url,
@@ -526,6 +789,7 @@ export interface LiveServerSourcesResponse {
   primeSrcHosts: LivePrimeSrcHost[];
   resolvedTmdbId?: number;
   resolvedImdbId?: string;
+  resolvedMalId?: number;
   recommendedServer?: AnyServerId;
 }
 
@@ -595,6 +859,8 @@ export async function fetchLiveServerSources(
     });
     if (tmdbId) params.set('tmdbId', tmdbId);
     if (imdbId) params.set('imdbId', imdbId);
+    if (media.title) params.set('title', media.title);
+    if (isLikelyAnime(media) && !media.malId) params.set('isAnime', '1');
 
     const res = await fetch(`/api/servers/sources?${params.toString()}`);
     if (res.ok) {
@@ -606,6 +872,7 @@ export async function fetchLiveServerSources(
         primeSrcHosts: Array.isArray(data.primeSrcHosts) ? data.primeSrcHosts : [],
         resolvedTmdbId: typeof data.resolvedTmdbId === 'number' ? data.resolvedTmdbId : undefined,
         resolvedImdbId: data.resolvedImdbId,
+        resolvedMalId: typeof data.resolvedMalId === 'number' ? data.resolvedMalId : undefined,
         recommendedServer: data.recommendedServer,
       };
     }

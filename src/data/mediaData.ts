@@ -1096,6 +1096,7 @@ export const MEDIA_CATALOG: MediaItem[] = [
     trailerYoutubeId: 'MGRm4IzK1SQ',
     imdbId: 'tt2560140',
     tmdbId: 1429,
+    malId: 16498,
     aliases: ['aot', 'attack on titan', 'shingeki no kyojin', 'eren', 'levi', 'titans', 'anime'],
     audioTracks: ['Japanese (Original)', 'English (Dub)', 'Spanish'],
     subtitles: ['English', 'Spanish', 'French', 'Arabic'],

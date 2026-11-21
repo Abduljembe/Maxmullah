@@ -63,6 +63,7 @@ export interface MediaItem {
   aliases?: string[];
   imdbId?: string;
   tmdbId?: number;
+  malId?: number;
 }
 
 export interface UserProfile {

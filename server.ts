@@ -47,6 +47,7 @@ const tmdbMetadataCache = new Map<string, { data: Record<string, unknown>; fetch
 const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
 const searchCache = new Map<string, { results: Record<string, unknown>[]; fetchedAt: number }>();
+const malIdCache = new Map<string, { malId: number | null; fetchedAt: number }>();
 
 const INDEX_CACHE_TTL_MS = 30 * 60 * 1000;
 const TMDB_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -179,6 +180,57 @@ async function resolveImdbIdFromTMDB(type: 'movie' | 'tv', tmdbId: number): Prom
     const imdbId = data.imdb_id ? data.imdb_id.trim() : null;
     externalIdCache.set(cacheKey, { imdbId, fetchedAt: Date.now() });
     return imdbId;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveMalIdByTitle(title: string): Promise<number | null> {
+  const cleanTitle = title.trim();
+  if (!cleanTitle) return null;
+  const cacheKey = cleanTitle.toLowerCase();
+  const cached = malIdCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < TMDB_CACHE_TTL_MS) {
+    return cached.malId;
+  }
+
+  // Primary: AniList GraphQL (fast & exposes verified MyAnimeList `idMal`)
+  try {
+    const aniRes = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: 'query($q:String){Media(search:$q,type:ANIME){idMal}}',
+        variables: { q: cleanTitle },
+      }),
+      signal: AbortSignal.timeout(3500),
+    });
+    if (aniRes.ok) {
+      const aniJson = (await aniRes.json()) as {
+        data?: { Media?: { idMal?: number | null } | null };
+      };
+      const malId =
+        aniJson?.data?.Media?.idMal && aniJson.data.Media.idMal > 0
+          ? aniJson.data.Media.idMal
+          : null;
+      if (malId) {
+        malIdCache.set(cacheKey, { malId, fetchedAt: Date.now() });
+        return malId;
+      }
+    }
+  } catch {}
+
+  // Secondary fallback: Jikan / MyAnimeList public search
+  try {
+    const res = await fetch(
+      `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(cleanTitle)}&limit=1`,
+      { signal: AbortSignal.timeout(3500) }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { data?: Array<{ mal_id?: number }> };
+    const malId = data?.data?.[0]?.mal_id && data.data[0].mal_id > 0 ? data.data[0].mal_id : null;
+    malIdCache.set(cacheKey, { malId, fetchedAt: Date.now() });
+    return malId;
   } catch {
     return null;
   }
@@ -684,6 +736,8 @@ async function startServer() {
   app.get('/api/servers/sources', async (req, res) => {
     const rawTmdbId = parseInt(String(req.query.tmdbId || '0'), 10);
     const initialImdbId = typeof req.query.imdbId === 'string' ? req.query.imdbId.trim() : '';
+    const titleHint = typeof req.query.title === 'string' ? req.query.title.trim() : '';
+    const isAnimeHint = req.query.isAnime === '1';
     const type = req.query.type === 'series' || req.query.type === 'tv' ? 'tv' : 'movie';
     const season = Math.max(1, parseInt(String(req.query.season || '1'), 10) || 1);
     const episode = Math.max(1, parseInt(String(req.query.episode || '1'), 10) || 1);
@@ -746,7 +800,7 @@ async function startServer() {
           ? `https://vixsrc.to/tv/${targetId}/${season}/${episode}`
           : `https://vixsrc.to/movie/${targetId}`;
 
-      const [streamsStore, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb] = await Promise.all([
+      const [streamsStore, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb, resolvedMalId] = await Promise.all([
         readStreamsStore(),
         fetch(primeUrl, {
           headers: {
@@ -786,6 +840,7 @@ async function startServer() {
         !initialImdbId && tmdbId > 0
           ? resolveImdbIdFromTMDB(type, tmdbId)
           : Promise.resolve(initialImdbId || null),
+        isAnimeHint && titleHint ? resolveMalIdByTitle(titleHint) : Promise.resolve(null),
       ]);
 
       let primeSrcHosts: PrimeSrcHost[] = [];
@@ -831,6 +886,7 @@ async function startServer() {
         primeSrcHosts,
         resolvedTmdbId: tmdbId > 0 ? tmdbId : undefined,
         resolvedImdbId: finalImdbId,
+        resolvedMalId: resolvedMalId || undefined,
         recommendedServer,
         info: primeInfo,
       });
