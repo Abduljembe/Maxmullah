@@ -17,6 +17,7 @@ import {
   ChevronDown,
   RefreshCw,
   ArrowDownToLine,
+  ShieldCheck,
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { MediaItem } from '../../types';
@@ -38,7 +39,7 @@ import {
   getSavedResumeSeconds,
   saveResumeSeconds,
 } from '../../services/videoProviderService';
-import { prewarmStreamUrl } from '../../utils/adBlocker';
+import { injectAdShieldIntoIframe, prewarmStreamUrl } from '../../utils/adBlocker';
 
 interface VideoPlayerModalProps {
   media: MediaItem;
@@ -206,6 +207,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       autoplay: providerCfg.autoplay,
       lang: providerCfg.preferredLang,
       startAt: startAtSeconds,
+      adShieldEnabled: providerCfg.adShieldEnabled !== false,
     }
   );
 
@@ -570,9 +572,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
           <iframe
             key={`player-frame-${selectedServer}-${currentSeason}-${currentEpisode}-${iframeKey}`}
+            data-mullahmax-player="true"
             src={activeStreamSource.url}
             title={displayTitle}
-            onLoad={() => setIframeLoaded(true)}
+            onLoad={(e) => {
+              setIframeLoaded(true);
+              if (providerCfg.adShieldEnabled !== false) {
+                injectAdShieldIntoIframe(e.currentTarget);
+              }
+            }}
             referrerPolicy="origin"
             allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *; accelerometer; gyroscope; clipboard-write; web-share"
             allowFullScreen
@@ -971,6 +979,28 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         {providerCfg.autoplay ? 'Autoplay On' : 'Autoplay Off'}
                       </button>
                     </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-0.5">
+                    <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      Redirect Ad Shield (JS)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateCustomization({
+                          adShieldEnabled: providerCfg.adShieldEnabled === false,
+                        })
+                      }
+                      className={`px-2.5 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
+                        providerCfg.adShieldEnabled !== false
+                          ? 'bg-emerald-600/25 border-emerald-500/60 text-emerald-200'
+                          : 'bg-white/5 border-white/15 text-slate-400'
+                      }`}
+                    >
+                      {providerCfg.adShieldEnabled !== false ? 'Active' : 'Off'}
+                    </button>
                   </div>
                 </div>
 

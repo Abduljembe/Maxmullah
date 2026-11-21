@@ -3,6 +3,75 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        if (window.__MULLAHMAX_SHIELD_BOOTED__) return;
+        window.__MULLAHMAX_SHIELD_BOOTED__ = true;
+        window.__MULLAHMAX_ALLOW_POPUP__ = false;
+
+        var AD_PATTERNS = /popads|popcash|propeller|adsterra|monetag|exoclick|juicyads|hilltopads|acscdn|onmarshtomorrow|onclickalgo|onclkds|doubleclick|googlesyndication|histats|ad-maven|bidvertiser|trafficjunky|clksite|clickadu|realsrv|trackwill|tsyndicate|adserver/i;
+        var nativeOpen = window.open ? window.open.bind(window) : function () { return null; };
+
+        try {
+          Object.defineProperty(window, 'open', {
+            configurable: false,
+            writable: false,
+            value: function (url, target, features) {
+              if (window.__MULLAHMAX_ALLOW_POPUP__) {
+                window.__MULLAHMAX_ALLOW_POPUP__ = false;
+                return nativeOpen(url, target, features);
+              }
+              return null;
+            },
+          });
+        } catch (e) {
+          window.open = function (url, target, features) {
+            if (window.__MULLAHMAX_ALLOW_POPUP__) {
+              window.__MULLAHMAX_ALLOW_POPUP__ = false;
+              return nativeOpen(url, target, features);
+            }
+            return null;
+          };
+        }
+
+        // Block synthetic anchor-tag click redirects spawned by ad scripts
+        var origAnchorClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+          var href = this.getAttribute('href') || '';
+          var sameOrigin = !href || href.startsWith('/') || href.startsWith('#') || href.startsWith('blob:') || href.startsWith(window.location.origin);
+          if (!sameOrigin && !window.__MULLAHMAX_ALLOW_POPUP__ && !this.dataset.mullahmaxAllowed) {
+            return;
+          }
+          return origAnchorClick.apply(this, arguments);
+        };
+
+        // Intercept dynamically created ad scripts/iframes/redirect links
+        var origCreateElement = document.createElement.bind(document);
+        document.createElement = function (tagName, options) {
+          var el = origCreateElement(tagName, options);
+          var lower = String(tagName).toLowerCase();
+          if (lower === 'script' || lower === 'iframe') {
+            var origSetAttr = el.setAttribute.bind(el);
+            el.setAttribute = function (name, val) {
+              if (name === 'src' && AD_PATTERNS.test(String(val))) {
+                return;
+              }
+              return origSetAttr(name, val);
+            };
+          }
+          return el;
+        };
+
+        // Recover window focus immediately if an embed tries a popunder blur redirect
+        window.addEventListener('blur', function () {
+          if (document.querySelector('iframe[data-mullahmax-player="true"]')) {
+            setTimeout(function () {
+              try { window.focus(); } catch (e) {}
+            }, 60);
+          }
+        });
+      })();
+    </script>
     <title>MullahMax — Unified Movies &amp; Series Hub</title>
     <meta name="description" content="Stream movies and series across Netflix, Max, Disney+, Apple TV+, Prime Video and more in one unified interface with offline viewing and personalized taste recommendations." />
     <meta property="og:title" content="MullahMax — Unified Movies &amp; Series Hub" />

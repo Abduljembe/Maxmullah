@@ -317,15 +317,25 @@ function isAllowedRemoteUrl(rawUrl: string): URL | null {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return null;
     }
-    const host = parsed.hostname.toLowerCase();
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (
       host === 'localhost' ||
       host === '127.0.0.1' ||
+      host.startsWith('127.') ||
       host === '0.0.0.0' ||
       host === '::1' ||
+      host === '::' ||
+      host === 'metadata.google.internal' ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
       host.startsWith('169.254.') ||
       host.startsWith('10.') ||
-      host.startsWith('192.168.')
+      host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      host.startsWith('::ffff:') ||
+      host.startsWith('fe80:') ||
+      host.startsWith('fc') ||
+      host.startsWith('fd')
     ) {
       return null;
     }
@@ -334,6 +344,96 @@ function isAllowedRemoteUrl(rawUrl: string): URL | null {
     return null;
   }
 }
+
+const EMBED_SHIELD_ALLOWED_HOSTS = new Set([
+  '2embed.cc',
+  'www.2embed.cc',
+  'vidsrc.to',
+  'www.vidsrc.to',
+  'vidsrc.sh',
+  'www.vidsrc.sh',
+  'vidsrc.me',
+  'www.vidsrc.me',
+  'vidsrc.xyz',
+  'www.vidsrc.xyz',
+  'multiembed.mov',
+  'www.multiembed.mov',
+  'player.videasy.net',
+  'vixsrc.to',
+  'www.vixsrc.to',
+]);
+
+function isAllowedEmbedShieldUrl(rawUrl: string): URL | null {
+  const parsed = isAllowedRemoteUrl(rawUrl);
+  if (!parsed) return null;
+  const host = parsed.hostname.toLowerCase();
+  return EMBED_SHIELD_ALLOWED_HOSTS.has(host) ? parsed : null;
+}
+
+const INFRAME_SHIELD_SCRIPT = `<script id="mullahmax-frame-js-shield">(function(){
+  if(window.__MULLAHMAX_FRAME_SHIELD__)return;
+  window.__MULLAHMAX_FRAME_SHIELD__=true;
+  var AD_RE=/popads|popcash|propeller|adsterra|monetag|exoclick|juicyads|hilltopads|acscdn|onmarshtomorrow|onclickalgo|onclkds|doubleclick|googlesyndication|histats|ad-maven|bidvertiser|trafficjunky|clksite|clickadu|realsrv|trackwill|tsyndicate|createlouisville|tagivi|adserver/i;
+  try{Object.defineProperty(window,'open',{configurable:false,writable:false,value:function(){return null;}});}catch(e){window.open=function(){return null;};}
+  try{
+    var origAClick=HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click=function(){
+      var href=this.getAttribute('href')||'';
+      if(this.target==='_blank'||AD_RE.test(href)||/^https?:\\/\\//i.test(href))return;
+      return origAClick.apply(this,arguments);
+    };
+  }catch(e){}
+  try{
+    var origCreate=document.createElement.bind(document);
+    document.createElement=function(tag,opts){
+      var el=origCreate(tag,opts);
+      var low=String(tag).toLowerCase();
+      if(low==='script'||low==='iframe'){
+        var origSet=el.setAttribute.bind(el);
+        el.setAttribute=function(k,v){
+          if(k==='src'&&AD_RE.test(String(v)))return;
+          return origSet(k,v);
+        };
+      }
+      return el;
+    };
+  }catch(e){}
+  function cleanOverlays(){
+    try{
+      document.querySelectorAll('a[target="_blank"],a[href*="pop"],a[href*="click"]').forEach(function(a){
+        var h=a.getAttribute('href')||'';
+        if(AD_RE.test(h)||(a.target==='_blank'&&!a.closest('.vjs-control-bar'))){
+          a.removeAttribute('href');
+          a.removeAttribute('target');
+          a.style.pointerEvents='none';
+        }
+      });
+      document.querySelectorAll('div,section,span').forEach(function(el){
+        if(el.querySelector('video,iframe'))return;
+        var cs=window.getComputedStyle(el);
+        if((cs.position==='fixed'||cs.position==='absolute')&&parseInt(cs.zIndex||'0',10)>999&&cs.opacity==='0'){
+          el.style.pointerEvents='none';
+          el.style.display='none';
+        }
+      });
+    }catch(e){}
+  }
+  document.addEventListener('click',function(e){
+    var a=e.target&&e.target.closest?e.target.closest('a'):null;
+    if(a&&(a.target==='_blank'||AD_RE.test(a.href||''))){
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  },true);
+  document.addEventListener('auxclick',function(e){
+    var a=e.target&&e.target.closest?e.target.closest('a'):null;
+    if(a){e.preventDefault();e.stopImmediatePropagation();}
+  },true);
+  if(document.documentElement&&typeof MutationObserver!=='undefined'){
+    new MutationObserver(cleanOverlays).observe(document.documentElement,{childList:true,subtree:true});
+  }
+  document.addEventListener('DOMContentLoaded',cleanOverlays);
+})();</script>`;
 
 async function startServer() {
   const app = express();
@@ -886,6 +986,110 @@ async function startServer() {
       if (!res.headersSent) {
         res.status(502).json({ error: msg });
       }
+    }
+  });
+
+  /**
+   * JS-Injected Anti-Redirect & Anti-Popunder Shield Proxy (/api/embed-shield)
+   * Fetches allowlisted external embed pages, strips popunder/ad scripts and meta refreshes,
+   * sets <base href> to the upstream origin, and injects the client-side anti-redirect JS guard.
+   */
+  app.get('/api/embed-shield', async (req, res) => {
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    let currentUrl = isAllowedEmbedShieldUrl(rawUrl);
+    if (!currentUrl) {
+      res.status(400).send('Invalid or unapproved embed URL.');
+      return;
+    }
+
+    try {
+      let upstream: globalThis.Response | null = null;
+      for (let hop = 0; hop < 4; hop++) {
+        const candidate = await fetch(currentUrl.toString(), {
+          redirect: 'manual',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            Referer: `${currentUrl.origin}/`,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (candidate.status >= 300 && candidate.status < 400) {
+          const location = candidate.headers.get('location');
+          if (!location) break;
+          const nextUrl = isAllowedEmbedShieldUrl(new URL(location, currentUrl).toString());
+          if (!nextUrl) {
+            res.status(400).send('Blocked redirect to unapproved origin.');
+            return;
+          }
+          currentUrl = nextUrl;
+          continue;
+        }
+
+        upstream = candidate;
+        break;
+      }
+
+      if (!upstream) {
+        res.status(502).send('Too many redirects from embed upstream.');
+        return;
+      }
+
+      const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('text/html') && !contentType.includes('xhtml')) {
+        res.status(upstream.status).type(contentType || 'text/plain').send(await upstream.text());
+        return;
+      }
+
+      const baseUrl: URL = currentUrl;
+      let html = await upstream.text();
+
+      // 1. Strip known popunder, ad-network, and histats scripts + meta refresh redirects
+      html = html.replace(
+        /<script\b[^>]*\bsrc\s*=\s*["'][^"']*(?:popads|popcash|propeller|adsterra|monetag|exoclick|juicyads|hilltopads|acscdn|onmarshtomorrow|onclickalgo|onclkds|doubleclick|googlesyndication|histats|ad-maven|bidvertiser|trafficjunky|clksite|clickadu|realsrv|trackwill|tsyndicate|createlouisville|tagivi|disable-devtool|adserver)[^"']*["'][^>]*>[\s\S]*?<\/script>/gi,
+        ''
+      );
+      html = html.replace(
+        /<script\b[^>]*>[\s\S]*?(?:Histats|popunder|onclickalgo|onmarshtomorrow|disable-devtool)[\s\S]*?<\/script>/gi,
+        ''
+      );
+      html = html.replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
+
+      // 2. Recursively shield nested allowlisted embed iframes (e.g. vidsrc.to -> vidsrc.sh)
+      html = html.replace(
+        /(<iframe\b[^>]*\bsrc\s*=\s*["'])([^"']+)(["'][^>]*>)/gi,
+        (full, prefix: string, srcVal: string, suffix: string) => {
+          try {
+            const absUrl = new URL(srcVal, baseUrl).toString();
+            if (isAllowedEmbedShieldUrl(absUrl)) {
+              return `${prefix}/api/embed-shield?url=${encodeURIComponent(absUrl)}${suffix}`;
+            }
+          } catch {
+            // Keep original attribute if malformed
+          }
+          return full;
+        }
+      );
+
+      // 3. Inject <base> to preserve upstream relative assets + inject early JS Anti-Redirect Shield
+      const safeOriginAttr = baseUrl.origin.replace(/["'<>]/g, '');
+      const injectedHeadPayload = `<base href="${safeOriginAttr}/">\n${INFRAME_SHIELD_SCRIPT}`;
+
+      if (/<head\b[^>]*>/i.test(html)) {
+        html = html.replace(/<head\b[^>]*>/i, (match) => `${match}\n${injectedHeadPayload}`);
+      } else {
+        html = `${injectedHeadPayload}\n${html}`;
+      }
+
+      res.status(upstream.status);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(html);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to shield embed frame';
+      res.status(502).send(msg);
     }
   });
 

@@ -1,4 +1,5 @@
 import { MediaItem } from '../types';
+import { wrapWithEmbedShieldProxy } from '../utils/adBlocker';
 
 export type VideoStreamProvider =
   | 'vidlink'
@@ -150,6 +151,7 @@ export interface VideoProviderConfig {
   secondaryColor: string; // hex color without # (default: 170000)
   autoplay: boolean;
   preferredLang: string; // e.g. '' (auto) | 'en' | 'it' | 'es' | 'fr' | 'de'
+  adShieldEnabled: boolean;
   customTemplate: string;
 }
 
@@ -173,6 +175,7 @@ const DEFAULT_CONFIG: VideoProviderConfig = {
   secondaryColor: '170000',
   autoplay: true,
   preferredLang: '',
+  adShieldEnabled: true,
   customTemplate:
     'https://vixsrc.to/movie/{id}?primaryColor=B20710&secondaryColor=170000&autoplay=true',
 };
@@ -200,6 +203,10 @@ export function getVideoProviderConfig(): VideoProviderConfig {
         secondaryColor: sanitizeHexColor(parsed.secondaryColor, DEFAULT_CONFIG.secondaryColor),
         autoplay: typeof parsed.autoplay === 'boolean' ? parsed.autoplay : DEFAULT_CONFIG.autoplay,
         preferredLang: typeof parsed.preferredLang === 'string' ? parsed.preferredLang : '',
+        adShieldEnabled:
+          typeof parsed.adShieldEnabled === 'boolean'
+            ? parsed.adShieldEnabled
+            : DEFAULT_CONFIG.adShieldEnabled,
         customTemplate: parsed.customTemplate || DEFAULT_CONFIG.customTemplate,
       };
     }
@@ -217,6 +224,7 @@ export function saveVideoProviderConfig(config: VideoProviderConfig) {
       secondaryColor: sanitizeHexColor(config.secondaryColor, DEFAULT_CONFIG.secondaryColor),
       autoplay: Boolean(config.autoplay),
       preferredLang: (config.preferredLang || '').trim(),
+      adShieldEnabled: config.adShieldEnabled !== false,
     };
     localStorage.setItem(STORAGE_KEY_PROVIDER, JSON.stringify(cleaned));
   } catch {}
@@ -293,6 +301,7 @@ export interface StreamCustomizationOptions {
   autoplay?: boolean;
   startAt?: number;
   lang?: string;
+  adShieldEnabled?: boolean;
 }
 
 export function buildVixSrcEmbedUrl(
@@ -439,60 +448,62 @@ export function generateStreamSource(
     };
   }
 
-  // 6. MultiEmbed (Backup)
+  const useShieldProxy = customization?.adShieldEnabled ?? cfg.adShieldEnabled ?? true;
+
+  // 6. MultiEmbed (Backup - wrapped with JS redirect ad shield when active)
   if (server === 'superembed') {
     const isTmdb = Boolean(media.tmdbId) || !targetId.startsWith('tt');
-    const url =
+    const rawUrl =
       media.type === 'series'
         ? `https://multiembed.mov/?video_id=${targetId}&tmdb=${isTmdb ? 1 : 0}&s=${sNum}&e=${epNum}`
         : `https://multiembed.mov/?video_id=${targetId}&tmdb=${isTmdb ? 1 : 0}`;
     return {
       type: 'iframe',
-      url,
+      url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
       providerName: 'MultiEmbed',
       serverId: 'superembed',
       targetId,
     };
   }
 
-  // 7. VidSrc Edge (Backup)
+  // 7. VidSrc Edge (Backup - wrapped with JS redirect ad shield when active)
   if (server === 'vidsrc_sh') {
-    const url =
+    const rawUrl =
       media.type === 'series'
         ? `https://vidsrc.sh/embed/tv?tmdb=${targetId}&season=${sNum}&episode=${epNum}&autoplay=true`
         : `https://vidsrc.sh/embed/movie?tmdb=${targetId}&autoplay=true`;
     return {
       type: 'iframe',
-      url,
+      url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
       providerName: 'VidSrc Edge',
       serverId: 'vidsrc_sh',
       targetId,
     };
   }
 
-  // 8. 2Embed (Backup)
+  // 8. 2Embed (Backup - wrapped with JS redirect ad shield when active)
   if (server === '2embed') {
-    const url =
+    const rawUrl =
       media.type === 'series'
         ? `https://www.2embed.cc/embedtv/${targetId}&s=${sNum}&e=${epNum}`
         : `https://www.2embed.cc/embed/${targetId}`;
     return {
       type: 'iframe',
-      url,
+      url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
       providerName: '2Embed',
       serverId: '2embed',
       targetId,
     };
   }
 
-  // 9. VidSrc Pro (Backup)
-  const url =
+  // 9. VidSrc Pro (Backup - wrapped with JS redirect ad shield when active)
+  const rawUrl =
     media.type === 'series'
       ? `https://vidsrc.to/embed/tv/${imdbFallback}/${sNum}/${epNum}`
       : `https://vidsrc.to/embed/movie/${imdbFallback}`;
   return {
     type: 'iframe',
-    url,
+    url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
     providerName: 'VidSrc Pro',
     serverId: 'vidsrc',
     targetId: imdbFallback,
