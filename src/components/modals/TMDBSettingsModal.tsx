@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Check,
@@ -8,8 +8,13 @@ import {
   PlaySquare,
   Server,
   Palette,
+  RefreshCw,
 } from 'lucide-react';
-import { getTMDBApiKey, saveTMDBApiKey } from '../../services/tmdbService';
+import {
+  getTMDBConfiguration,
+  initTMDBConfiguration,
+} from '../../services/tmdbService';
+import { TMDBConfiguration } from '../../types';
 import {
   getVideoProviderConfig,
   saveVideoProviderConfig,
@@ -31,8 +36,14 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'videoProvider' | 'tmdb'>('videoProvider');
   const [providerCfg, setProviderCfg] = useState(getVideoProviderConfig());
-  const [tmdbKey, setTmdbKey] = useState(getTMDBApiKey());
+  const [tmdbConfig, setTmdbConfig] = useState<TMDBConfiguration>(() => getTMDBConfiguration());
+  const [isRefreshingCfg, setIsRefreshingCfg] = useState(false);
   const [savedBanner, setSavedBanner] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    initTMDBConfiguration().then((cfg) => setTmdbConfig(cfg));
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -43,13 +54,25 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
     setTimeout(() => setSavedBanner(null), 3500);
   };
 
-  const handleSaveTMDB = async (e: React.FormEvent) => {
-    e.preventDefault();
-    saveTMDBApiKey(tmdbKey);
-    setSavedBanner('Metadata settings saved.');
-    setTimeout(() => setSavedBanner(null), 3000);
-    onReloadCatalog();
+  const handleRefreshTMDB = async () => {
+    setIsRefreshingCfg(true);
+    try {
+      const cfg = await initTMDBConfiguration(true);
+      setTmdbConfig(cfg);
+      onReloadCatalog();
+      setSavedBanner('TMDB configuration & live catalog synchronized.');
+      setTimeout(() => setSavedBanner(null), 3000);
+    } finally {
+      setIsRefreshingCfg(false);
+    }
   };
+
+  const authStatusLabel =
+    tmdbConfig.authMode === 'bearer'
+      ? 'Bearer Read Token Active'
+      : tmdbConfig.authMode === 'api_key'
+      ? 'Server API Key Active'
+      : 'Cinemeta + Image CDN Active';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
@@ -65,7 +88,7 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
                 Playback &amp; Server Preferences
               </h3>
               <p className="text-xs text-slate-400">
-                Choose default streaming server, player accent theme, and metadata lookup
+                Choose default streaming server, player accent theme, and catalog configuration
               </p>
             </div>
           </div>
@@ -100,7 +123,7 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
             }`}
           >
             <Globe className="w-3.5 h-3.5" />
-            <span>Catalog &amp; Search</span>
+            <span>Catalog &amp; Configuration</span>
           </button>
         </div>
 
@@ -176,7 +199,7 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
                     placeholder="e50914"
                     className="flex-1 bg-white/5 border border-white/15 focus:border-rose-500 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-slate-500 focus:outline-none"
                   />
-                  {['e50914', '3b82f6', '10b981', '8b5cf6', 'f59e0b'].map((col) => (
+                  {['ffffff', 'e50914', '3b82f6', '10b981', 'f59e0b'].map((col) => (
                     <button
                       key={col}
                       type="button"
@@ -209,46 +232,49 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
           </form>
         )}
 
-        {/* TAB 2: Metadata & TMDB Key */}
+        {/* TAB 2: TMDB Configuration & Metadata Engine */}
         {activeTab === 'tmdb' && (
-          <form onSubmit={handleSaveTMDB} className="space-y-4">
-            <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10">
-              <div className="flex items-center justify-between text-xs font-semibold mb-1">
-                <span className="text-slate-400">Catalog Engine</span>
+          <div className="space-y-4">
+            <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-2">
+              <div className="flex items-center justify-between text-xs font-semibold">
+                <span className="text-slate-400">TMDB v3 Engine</span>
                 <span className="text-emerald-400 flex items-center gap-1 font-bold">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  Live Discovery Active
+                  {authStatusLabel}
                 </span>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Movies and series load directly from VixSrc, PrimeSrc, and major streaming catalogs automatically.
+                Catalog requests run through server-side proxy endpoints using configured credentials and live TMDB CDN image sizing rules.
               </p>
             </div>
 
-            <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5 flex items-center justify-between">
-                <span>Personal TMDB API Key (Optional)</span>
-                {tmdbKey && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      saveTMDBApiKey('');
-                      setTmdbKey('');
-                      onReloadCatalog();
-                    }}
-                    className="text-[11px] text-rose-400 hover:text-rose-300 underline cursor-pointer"
-                  >
-                    Clear Key
-                  </button>
-                )}
-              </label>
-              <input
-                type="text"
-                value={tmdbKey}
-                onChange={(e) => setTmdbKey(e.target.value)}
-                placeholder="Paste personal TMDB v3 API Key (optional)..."
-                className="w-full bg-white/5 border border-white/15 focus:border-rose-500 rounded-xl px-3.5 py-2.5 text-xs text-white font-mono placeholder-slate-500 focus:outline-none transition-colors"
-              />
+            <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-2.5 text-[11px]">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Image CDN Base</span>
+                <span className="font-mono text-slate-200">{tmdbConfig.images.secure_base_url}</span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-slate-400 shrink-0">Poster Sizes</span>
+                <span className="font-mono text-slate-300 truncate">
+                  {tmdbConfig.images.poster_sizes.join(', ')}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-slate-400 shrink-0">Backdrop Sizes</span>
+                <span className="font-mono text-slate-300 truncate">
+                  {tmdbConfig.images.backdrop_sizes.join(', ')}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-slate-400 shrink-0">Logo &amp; Profile Sizes</span>
+                <span className="font-mono text-slate-300 truncate">
+                  {tmdbConfig.images.logo_sizes.length} logos · {tmdbConfig.images.profile_sizes.length} profiles
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Change Tracking Keys</span>
+                <span className="font-mono text-slate-200">{tmdbConfig.change_keys.length} registered</span>
+              </div>
             </div>
 
             <div className="pt-3 flex items-center justify-end gap-2 border-t border-white/10">
@@ -260,14 +286,16 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
                 Close
               </button>
               <button
-                type="submit"
-                className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-all shadow-md cursor-pointer"
+                type="button"
+                onClick={handleRefreshTMDB}
+                disabled={isRefreshingCfg}
+                className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold transition-all shadow-md cursor-pointer"
               >
-                <Check className="w-3.5 h-3.5" />
-                <span>Save Settings</span>
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingCfg ? 'animate-spin' : ''}`} />
+                <span>Sync Configuration &amp; Reload</span>
               </button>
             </div>
-          </form>
+          </div>
         )}
       </div>
     </div>

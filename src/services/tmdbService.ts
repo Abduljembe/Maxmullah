@@ -1,66 +1,149 @@
-import { MediaItem, StreamingPlatform } from '../types';
+import {
+  CastMemberProfile,
+  MediaItem,
+  StreamingPlatform,
+  TMDBConfiguration,
+} from '../types';
 
-const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
-const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 const TVMAZE_BASE_URL = 'https://api.tvmaze.com';
 
-const STORAGE_KEY_API_KEY = 'mullahmax_tmdb_api_key';
-export const DEFAULT_PUBLIC_TMDB_KEY = '1cf50e6248dc270629e802686245c2c8';
+export const TMDB_DEFAULT_CONFIGURATION: TMDBConfiguration = {
+  images: {
+    base_url: 'http://image.tmdb.org/t/p/',
+    secure_base_url: 'https://image.tmdb.org/t/p/',
+    backdrop_sizes: ['w300', 'w780', 'w1280', 'original'],
+    logo_sizes: ['w45', 'w92', 'w154', 'w185', 'w300', 'w500', 'original'],
+    poster_sizes: ['w92', 'w154', 'w185', 'w342', 'w500', 'w780', 'original'],
+    profile_sizes: ['w45', 'w185', 'h632', 'original'],
+    still_sizes: ['w92', 'w185', 'w300', 'original'],
+  },
+  change_keys: [
+    'adult', 'air_date', 'also_known_as', 'alternative_titles', 'biography', 'birthday',
+    'budget', 'cast', 'certifications', 'character_names', 'created_by', 'crew',
+    'deathday', 'episode', 'episode_number', 'episode_run_time', 'freebase_id', 'freebase_mid',
+    'general', 'genres', 'guest_stars', 'homepage', 'images', 'imdb_id', 'languages', 'name',
+    'network', 'origin_country', 'original_name', 'original_title', 'overview', 'parts',
+    'place_of_birth', 'plot_keywords', 'production_code', 'production_companies',
+    'production_countries', 'releases', 'revenue', 'runtime', 'season', 'season_number',
+    'season_regular', 'spoken_languages', 'status', 'tagline', 'title', 'translations',
+    'tvdb_id', 'tvrage_id', 'type', 'video', 'videos',
+  ],
+  authConfigured: false,
+  authMode: 'fallback',
+};
 
-export function getTMDBApiKey(): string {
-  if (typeof window === 'undefined') return DEFAULT_PUBLIC_TMDB_KEY;
-  try {
-    const userKey = localStorage.getItem(STORAGE_KEY_API_KEY);
-    if (userKey && userKey.trim()) return userKey.trim();
-  } catch {}
-  return (import.meta.env.VITE_TMDB_API_KEY as string) || DEFAULT_PUBLIC_TMDB_KEY;
+let activeTMDBConfiguration: TMDBConfiguration = TMDB_DEFAULT_CONFIGURATION;
+let configPromise: Promise<TMDBConfiguration> | null = null;
+
+export function getTMDBConfiguration(): TMDBConfiguration {
+  return activeTMDBConfiguration;
 }
 
-export function saveTMDBApiKey(key: string) {
-  try {
-    if (key.trim()) {
-      localStorage.setItem(STORAGE_KEY_API_KEY, key.trim());
-    } else {
-      localStorage.removeItem(STORAGE_KEY_API_KEY);
-    }
-  } catch {}
+export async function initTMDBConfiguration(forceRefresh = false): Promise<TMDBConfiguration> {
+  if (!forceRefresh && configPromise) return configPromise;
+
+  const loader = (async () => {
+    try {
+      const res = await fetch('/api/tmdb/configuration');
+      if (res.ok) {
+        const data = (await res.json()) as TMDBConfiguration;
+        if (data?.images?.secure_base_url && Array.isArray(data.change_keys)) {
+          activeTMDBConfiguration = data;
+          return data;
+        }
+      }
+    } catch {}
+    return activeTMDBConfiguration;
+  })();
+
+  configPromise = loader;
+  return loader;
+}
+
+export function isValidTMDBChangeKey(key: string): boolean {
+  return activeTMDBConfiguration.change_keys.includes(key);
+}
+
+export type TMDBImageKind = 'poster' | 'backdrop' | 'logo' | 'profile' | 'still';
+
+export function buildTMDBImageUrl(
+  filePath: string | null | undefined,
+  kind: TMDBImageKind = 'poster',
+  preferredSize?: string
+): string {
+  if (!filePath) return '';
+  const trimmed = filePath.trim();
+  if (!trimmed) return '';
+  if (
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('data:')
+  ) {
+    return trimmed;
+  }
+
+  const imagesCfg = activeTMDBConfiguration.images;
+  const baseUrl = (imagesCfg.secure_base_url || 'https://image.tmdb.org/t/p/').replace(/\/+$/, '');
+  const sizePoolMap: Record<TMDBImageKind, string[]> = {
+    poster: imagesCfg.poster_sizes,
+    backdrop: imagesCfg.backdrop_sizes,
+    logo: imagesCfg.logo_sizes,
+    profile: imagesCfg.profile_sizes,
+    still: imagesCfg.still_sizes,
+  };
+  const defaultPreferredMap: Record<TMDBImageKind, string> = {
+    poster: 'w500',
+    backdrop: 'w1280',
+    logo: 'w300',
+    profile: 'w185',
+    still: 'w300',
+  };
+
+  const allowedSizes = sizePoolMap[kind] || imagesCfg.poster_sizes;
+  const targetSize = preferredSize || defaultPreferredMap[kind];
+  const resolvedSize = allowedSizes.includes(targetSize)
+    ? targetSize
+    : allowedSizes[Math.max(0, allowedSizes.length - 2)] || 'original';
+
+  const normalizedPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return `${baseUrl}/${resolvedSize}${normalizedPath}`;
 }
 
 /**
- * Fetches any TMDB v3 endpoint reliably via the backend /api/tmdb/* proxy first
- * (avoids browser CORS/ISP throttling and uses server TMDB_API_KEY), falling back to direct TMDB.
+ * Fetches any TMDB v3 endpoint reliably via the backend /api/tmdb/* proxy
+ * (authenticated server-side with Bearer Read Access Token / API key).
  */
 async function tmdbFetchJson<T = Record<string, unknown>>(
   tmdbPath: string,
   paramsObj: Record<string, string | number | boolean> = {}
 ): Promise<T | null> {
-  const key = getTMDBApiKey();
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(paramsObj)) {
     qs.set(k, String(v));
   }
-  if (key && key !== DEFAULT_PUBLIC_TMDB_KEY) {
-    qs.set('api_key', key);
-  }
 
   try {
-    const proxyRes = await fetch(`/api/tmdb/${tmdbPath}?${qs.toString()}`);
+    const queryStr = qs.toString();
+    const url = queryStr ? `/api/tmdb/${tmdbPath}?${queryStr}` : `/api/tmdb/${tmdbPath}`;
+    const proxyRes = await fetch(url);
     if (proxyRes.ok) {
       return (await proxyRes.json()) as T;
     }
   } catch {}
 
-  if (key) {
-    try {
-      qs.set('api_key', key);
-      const directRes = await fetch(`${TMDB_BASE_URL}/${tmdbPath}?${qs.toString()}`);
-      if (directRes.ok) {
-        return (await directRes.json()) as T;
-      }
-    } catch {}
-  }
-
   return null;
+}
+
+export async function fetchTMDBDetail(
+  type: 'movie' | 'tv',
+  tmdbId: number
+): Promise<MediaItem | null> {
+  if (!tmdbId || tmdbId <= 0) return null;
+  const raw = await tmdbFetchJson<RawTMDBItem>(`${type}/${tmdbId}`, {
+    append_to_response: 'credits,images,watch/providers,external_ids',
+  });
+  if (!raw || (!raw.title && !raw.name)) return null;
+  return normalizeTMDBItem(raw, type === 'tv' ? 'series' : 'movie');
 }
 
 const TMDB_GENRES: Record<number, string> = {
@@ -121,11 +204,15 @@ interface RawTMDBItem {
   first_air_date?: string;
   overview?: string;
   vote_average: number;
+  runtime?: number;
   genre_ids?: number[];
   genres?: (string | { id: number; name: string })[];
   tagline?: string;
+  images?: {
+    logos?: Array<{ file_path?: string; iso_639_1?: string }>;
+  };
   credits?: {
-    cast?: { name: string }[];
+    cast?: { name: string; character?: string; profile_path?: string | null }[];
     crew?: { name: string; job: string }[];
   };
   'watch/providers'?: {
@@ -201,24 +288,35 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><rect width="400" height="600" fill="#0e121b"/><rect x="150" y="250" width="100" height="100" rx="20" fill="#1e293b"/><polygon points="188,280 188,320 222,300" fill="#e11d48"/></svg>'
     );
 
-  const posterUrl = raw.poster_path
-    ? raw.poster_path.startsWith('http')
-      ? raw.poster_path
-      : `${TMDB_IMAGE_BASE}/w500${raw.poster_path}`
-    : posterFallbackSvg;
+  const posterUrl =
+    buildTMDBImageUrl(raw.poster_path, 'poster', 'w500') || posterFallbackSvg;
 
-  const backdropUrl = raw.backdrop_path
-    ? raw.backdrop_path.startsWith('http')
-      ? raw.backdrop_path
-      : `${TMDB_IMAGE_BASE}/original${raw.backdrop_path}`
-    : posterUrl;
+  const backdropUrl =
+    buildTMDBImageUrl(raw.backdrop_path, 'backdrop', 'w1280') || posterUrl;
+
+  const preferredLogo =
+    raw.images?.logos?.find((l) => l.iso_639_1 === 'en') || raw.images?.logos?.[0];
+  const logoUrl = preferredLogo?.file_path
+    ? buildTMDBImageUrl(preferredLogo.file_path, 'logo', 'w300')
+    : undefined;
 
   const cast: string[] = [];
+  const castProfiles: CastMemberProfile[] = [];
   let director: string | undefined;
 
   if (raw.credits) {
     if (raw.credits.cast) {
-      cast.push(...raw.credits.cast.slice(0, 4).map((c) => c.name));
+      const topCast = raw.credits.cast.slice(0, 6);
+      cast.push(...topCast.slice(0, 4).map((c) => c.name));
+      topCast.forEach((c) => {
+        castProfiles.push({
+          name: c.name,
+          character: c.character,
+          profileUrl: c.profile_path
+            ? buildTMDBImageUrl(c.profile_path, 'profile', 'w185')
+            : undefined,
+        });
+      });
     }
     if (raw.credits.crew) {
       const dir = raw.credits.crew.find((c) => c.job === 'Director');
@@ -232,6 +330,11 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
   const rawVote = typeof raw.vote_average === 'number' ? raw.vote_average : 0;
   const imdbScore = rawVote > 0 ? Number(rawVote.toFixed(1)) : 0;
   const rottenTomatoesScore = imdbScore > 0 ? Math.min(100, Math.round(imdbScore * 10)) : 0;
+  const runtimeMinutes =
+    typeof raw.runtime === 'number' && raw.runtime > 0 ? raw.runtime : undefined;
+  const formattedRuntime = runtimeMinutes
+    ? `${Math.floor(runtimeMinutes / 60)}h ${runtimeMinutes % 60}m`
+    : undefined;
 
   const resolvedTmdbId =
     raw.moviedb_id && raw.moviedb_id > 0
@@ -255,17 +358,19 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
     rating: type === 'series' ? 'TV-MA' : 'PG-13',
     imdbScore,
     rottenTomatoesScore,
-    duration: type === 'movie' ? '2h 14m' : '3 Seasons · 24 Episodes',
-    durationMinutes: type === 'movie' ? 134 : undefined,
+    duration: formattedRuntime || (type === 'movie' ? '2h 14m' : '3 Seasons · 24 Episodes'),
+    durationMinutes: runtimeMinutes || (type === 'movie' ? 134 : undefined),
     genres,
     platforms,
     primaryPlatform,
     tagline: raw.tagline || 'Streaming across major platforms in MullahMax.',
     description: raw.overview || 'Available in 4K HDR with offline viewing on MullahMax.',
     cast,
+    castProfiles: castProfiles.length > 0 ? castProfiles : undefined,
     director,
     posterUrl,
     backdropUrl,
+    logoUrl,
     videoPreviewUrl: '',
     audioTracks: ['English (Dolby Atmos)', 'Spanish (5.1)', 'French (5.1)', 'German', 'Japanese'],
     subtitles: ['English [CC]', 'Spanish', 'French', 'German', 'Japanese'],
@@ -797,18 +902,14 @@ export async function fetchNewReleasesFeed(tab: NewReleaseFeedTab, page = 1): Pr
   return res.items;
 }
 
-// Live search: prefers reliable server-side /api/search proxy, then direct TMDB, then TVMaze
+// Live search: uses reliable server-side /api/search proxy (TMDB Bearer/Key + Cinemeta), then TVMaze
 export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> {
   const trimmed = query.trim();
   if (!trimmed) return [];
-  const key = getTMDBApiKey();
 
-  // 1. Try Express backend /api/search proxy (avoids browser CORS/DNS blocks)
+  // 1. Express backend /api/search proxy (authenticated server-side via Bearer Read Token / API Key + Cinemeta fallback)
   try {
     const params = new URLSearchParams({ q: trimmed, page: String(page) });
-    if (key && key !== DEFAULT_PUBLIC_TMDB_KEY) {
-      params.set('apiKey', key);
-    }
     const proxyRes = await fetch(`/api/search?${params.toString()}`);
     if (proxyRes.ok) {
       const data = (await proxyRes.json()) as { results?: RawTMDBItem[] };
@@ -820,23 +921,7 @@ export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> 
     }
   } catch {}
 
-  // 2. Fallback to direct TMDB query
-  if (key) {
-    try {
-      const url = `${TMDB_BASE_URL}/search/multi?api_key=${key}&query=${encodeURIComponent(
-        trimmed
-      )}&page=${page}&include_adult=false`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        return (data.results || [])
-          .filter((item: RawTMDBItem) => item.media_type === 'movie' || item.media_type === 'tv')
-          .map((item: RawTMDBItem) => normalizeTMDBItem(item));
-      }
-    } catch {}
-  }
-
-  // 3. Instant Zero-Key Live Search Fallback via TVMaze
+  // 2. Instant Zero-Key Live Search Fallback via TVMaze
   try {
     const res = await fetch(
       `${TVMAZE_BASE_URL}/search/shows?q=${encodeURIComponent(trimmed)}`

@@ -10,9 +10,103 @@ import { createServer as createViteServer } from 'vite';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
-const DEFAULT_TMDB_KEY = process.env.TMDB_API_KEY || '1cf50e6248dc270629e802686245c2c8';
+const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const DATA_DIR = path.resolve(__dirname, 'data');
 const STREAMS_STORE_PATH = path.join(DATA_DIR, 'streams-library.json');
+
+interface TMDBConfigurationPayload {
+  images: {
+    base_url: string;
+    secure_base_url: string;
+    backdrop_sizes: string[];
+    logo_sizes: string[];
+    poster_sizes: string[];
+    profile_sizes: string[];
+    still_sizes: string[];
+  };
+  change_keys: string[];
+}
+
+const TMDB_DEFAULT_CONFIGURATION: TMDBConfigurationPayload = {
+  images: {
+    base_url: 'http://image.tmdb.org/t/p/',
+    secure_base_url: 'https://image.tmdb.org/t/p/',
+    backdrop_sizes: ['w300', 'w780', 'w1280', 'original'],
+    logo_sizes: ['w45', 'w92', 'w154', 'w185', 'w300', 'w500', 'original'],
+    poster_sizes: ['w92', 'w154', 'w185', 'w342', 'w500', 'w780', 'original'],
+    profile_sizes: ['w45', 'w185', 'h632', 'original'],
+    still_sizes: ['w92', 'w185', 'w300', 'original'],
+  },
+  change_keys: [
+    'adult', 'air_date', 'also_known_as', 'alternative_titles', 'biography', 'birthday',
+    'budget', 'cast', 'certifications', 'character_names', 'created_by', 'crew',
+    'deathday', 'episode', 'episode_number', 'episode_run_time', 'freebase_id', 'freebase_mid',
+    'general', 'genres', 'guest_stars', 'homepage', 'images', 'imdb_id', 'languages', 'name',
+    'network', 'origin_country', 'original_name', 'original_title', 'overview', 'parts',
+    'place_of_birth', 'plot_keywords', 'production_code', 'production_companies',
+    'production_countries', 'releases', 'revenue', 'runtime', 'season', 'season_number',
+    'season_regular', 'spoken_languages', 'status', 'tagline', 'title', 'translations',
+    'tvdb_id', 'tvrage_id', 'type', 'video', 'videos',
+  ],
+};
+
+function getTMDBAuthCredentials(): {
+  bearerToken: string;
+  apiKey: string;
+  authMode: 'bearer' | 'api_key' | 'fallback';
+} {
+  const bearerToken = (process.env.TMDB_READ_ACCESS_TOKEN || '').trim();
+  const apiKey = (process.env.TMDB_API_KEY || '').trim();
+  const authMode: 'bearer' | 'api_key' | 'fallback' = bearerToken
+    ? 'bearer'
+    : apiKey
+    ? 'api_key'
+    : 'fallback';
+  return { bearerToken, apiKey, authMode };
+}
+
+async function fetchTMDB<T = Record<string, unknown>>(
+  tmdbPath: string,
+  params: Record<string, string | number | boolean> = {},
+  timeoutMs = 6000
+): Promise<T | null> {
+  const { bearerToken, apiKey } = getTMDBAuthCredentials();
+  if (!bearerToken && !apiKey) {
+    return null;
+  }
+
+  const cleanPath = tmdbPath.replace(/^\/+/, '');
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (k !== 'api_key' && v !== undefined && v !== null) {
+      qs.set(k, String(v));
+    }
+  }
+
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+  };
+  if (bearerToken) {
+    headers.Authorization = `Bearer ${bearerToken}`;
+  } else if (apiKey) {
+    qs.set('api_key', apiKey);
+  }
+
+  const queryStr = qs.toString();
+  const url = queryStr ? `${TMDB_BASE_URL}/${cleanPath}?${queryStr}` : `${TMDB_BASE_URL}/${cleanPath}`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
 
 interface VixSrcEntry {
   tmdb_id: number;
@@ -48,9 +142,11 @@ const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
 const searchCache = new Map<string, { results: Record<string, unknown>[]; fetchedAt: number }>();
 const malIdCache = new Map<string, { malId: number | null; fetchedAt: number }>();
+let tmdbConfigCache: { data: TMDBConfigurationPayload; fetchedAt: number } | null = null;
 
 const INDEX_CACHE_TTL_MS = 30 * 60 * 1000;
 const TMDB_CACHE_TTL_MS = 60 * 60 * 1000;
+const TMDB_CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const TMDB_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -141,25 +237,21 @@ async function fetchTMDBItemMetadata(
     return cached.data;
   }
 
-  try {
-    const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${DEFAULT_TMDB_KEY}&append_to_response=credits,watch/providers,external_ids`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-    if (!res.ok) return null;
-    const data = (await res.json()) as Record<string, unknown>;
-    if (!data || (!data.title && !data.name)) return null;
-    if (!data.poster_path && !data.backdrop_path) return null;
-    const extIds = data.external_ids as { imdb_id?: string } | undefined;
-    const resolvedImdb =
-      imdbId || extIds?.imdb_id || (typeof data.imdb_id === 'string' ? data.imdb_id : '');
-    if (resolvedImdb) {
-      data.imdb_id = resolvedImdb;
-      externalIdCache.set(cacheKey, { imdbId: resolvedImdb, fetchedAt: Date.now() });
-    }
-    tmdbMetadataCache.set(cacheKey, { data, fetchedAt: Date.now() });
-    return data;
-  } catch {
-    return null;
+  const data = await fetchTMDB<Record<string, unknown>>(`${type}/${tmdbId}`, {
+    append_to_response: 'credits,images,watch/providers,external_ids',
+  });
+  if (!data || (!data.title && !data.name)) return null;
+  if (!data.poster_path && !data.backdrop_path) return null;
+
+  const extIds = data.external_ids as { imdb_id?: string } | undefined;
+  const resolvedImdb =
+    imdbId || extIds?.imdb_id || (typeof data.imdb_id === 'string' ? data.imdb_id : '');
+  if (resolvedImdb) {
+    data.imdb_id = resolvedImdb;
+    externalIdCache.set(cacheKey, { imdbId: resolvedImdb, fetchedAt: Date.now() });
   }
+  tmdbMetadataCache.set(cacheKey, { data, fetchedAt: Date.now() });
+  return data;
 }
 
 async function resolveImdbIdFromTMDB(type: 'movie' | 'tv', tmdbId: number): Promise<string | null> {
@@ -170,19 +262,11 @@ async function resolveImdbIdFromTMDB(type: 'movie' | 'tv', tmdbId: number): Prom
     return cached.imdbId;
   }
 
-  try {
-    const res = await fetch(
-      `https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids?api_key=${DEFAULT_TMDB_KEY}`,
-      { signal: AbortSignal.timeout(3500) }
-    );
-    if (!res.ok) return null;
-    const data = (await res.json()) as { imdb_id?: string | null };
-    const imdbId = data.imdb_id ? data.imdb_id.trim() : null;
-    externalIdCache.set(cacheKey, { imdbId, fetchedAt: Date.now() });
-    return imdbId;
-  } catch {
-    return null;
-  }
+  const data = await fetchTMDB<{ imdb_id?: string | null }>(`${type}/${tmdbId}/external_ids`, {}, 3500);
+  if (!data) return null;
+  const imdbId = data.imdb_id ? data.imdb_id.trim() : null;
+  externalIdCache.set(cacheKey, { imdbId, fetchedAt: Date.now() });
+  return imdbId;
 }
 
 async function resolveMalIdByTitle(title: string): Promise<number | null> {
@@ -564,48 +648,76 @@ async function startServer() {
   });
 
   /**
+   * TMDB v3 /3/configuration endpoint (cached 24h, authenticated via Bearer token or API key).
+   * Returns image CDN base URLs, supported size arrays, change_keys, and credential status.
+   */
+  app.get('/api/tmdb/configuration', async (_req, res) => {
+    const { bearerToken, apiKey, authMode } = getTMDBAuthCredentials();
+    const authConfigured = Boolean(bearerToken || apiKey);
+
+    if (tmdbConfigCache && Date.now() - tmdbConfigCache.fetchedAt < TMDB_CONFIG_CACHE_TTL_MS) {
+      res.json({
+        ...tmdbConfigCache.data,
+        authConfigured,
+        authMode,
+      });
+      return;
+    }
+
+    if (authConfigured) {
+      const liveConfig = await fetchTMDB<TMDBConfigurationPayload>('configuration', {}, 5500);
+      if (liveConfig?.images?.secure_base_url && Array.isArray(liveConfig.change_keys)) {
+        tmdbConfigCache = { data: liveConfig, fetchedAt: Date.now() };
+        res.json({
+          ...liveConfig,
+          authConfigured: true,
+          authMode,
+        });
+        return;
+      }
+    }
+
+    res.json({
+      ...TMDB_DEFAULT_CONFIGURATION,
+      authConfigured,
+      authMode,
+    });
+  });
+
+  /**
    * Universal Server-Side TMDB Proxy (/api/tmdb/*)
-   * Automatically falls back to zero-key Cinemeta catalog if TMDB fails or rate-limits.
+   * Uses server-side TMDB_READ_ACCESS_TOKEN (Bearer) or TMDB_API_KEY and
+   * automatically falls back to zero-key Cinemeta catalog if TMDB is unconfigured or rate-limited.
    */
   app.get('/api/tmdb/*', async (req, res) => {
-    const tmdbSubpath = req.path.replace(/^\/api\/tmdb\/?/, '');
-    if (!tmdbSubpath || tmdbSubpath.includes('..')) {
+    const tmdbSubpath = req.path.replace(/^\/api\/tmdb\/?/, '').replace(/^\/+/, '');
+    if (!tmdbSubpath || tmdbSubpath.includes('..') || !/^[a-zA-Z0-9/_,.-]+$/.test(tmdbSubpath)) {
       res.status(400).json({ error: 'Invalid TMDB path' });
       return;
     }
 
-    const incomingParams = new URLSearchParams();
+    const incomingParams: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.query)) {
       if (typeof v === 'string' && k !== 'api_key') {
-        incomingParams.set(k, v);
+        incomingParams[k] = v;
       }
     }
-    const providedKey = typeof req.query.api_key === 'string' && req.query.api_key.trim().length > 10
-      ? req.query.api_key.trim()
-      : DEFAULT_TMDB_KEY;
-    incomingParams.set('api_key', providedKey);
 
-    const cacheKey = `${tmdbSubpath}?${incomingParams.toString()}`;
+    const cacheKey = `${tmdbSubpath}?${new URLSearchParams(incomingParams).toString()}`;
     const cached = tmdbProxyCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < TMDB_PROXY_CACHE_TTL_MS) {
       res.json(cached.data);
       return;
     }
 
-    try {
-      const upstream = await fetch(
-        `https://api.themoviedb.org/3/${tmdbSubpath}?${incomingParams.toString()}`,
-        { signal: AbortSignal.timeout(6500) }
-      );
-      if (upstream.ok) {
-        const data = await upstream.json();
-        tmdbProxyCache.set(cacheKey, { data, fetchedAt: Date.now() });
-        res.json(data);
-        return;
-      }
-    } catch {}
+    const data = await fetchTMDB(tmdbSubpath, incomingParams, 6500);
+    if (data) {
+      tmdbProxyCache.set(cacheKey, { data, fetchedAt: Date.now() });
+      res.json(data);
+      return;
+    }
 
-    // Zero-key Cinemeta fallback if TMDB is unavailable or key hits quota
+    // Zero-key Cinemeta fallback if TMDB credentials are not set or TMDB is unreachable
     const isTv = tmdbSubpath.includes('tv');
     const queryParam = typeof req.query.query === 'string' ? req.query.query.trim() : '';
     if (queryParam) {
@@ -621,15 +733,11 @@ async function startServer() {
   });
 
   /**
-   * Reliable server-side search proxy across TMDB + Zero-Key Cinemeta fallback.
+   * Reliable server-side search proxy across TMDB (Bearer/API Key) + Zero-Key Cinemeta fallback.
    */
   app.get('/api/search', async (req, res) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
-    const customKey =
-      typeof req.query.apiKey === 'string' && req.query.apiKey.trim().length > 10
-        ? req.query.apiKey.trim()
-        : DEFAULT_TMDB_KEY;
 
     if (!query) {
       res.json({ results: [] });
@@ -643,23 +751,21 @@ async function startServer() {
       return;
     }
 
-    try {
-      const url = `https://api.themoviedb.org/3/search/multi?api_key=${encodeURIComponent(
-        customKey
-      )}&query=${encodeURIComponent(query)}&page=${page}&include_adult=false`;
-      const tmdbRes = await fetch(url, { signal: AbortSignal.timeout(5500) });
-      if (tmdbRes.ok) {
-        const data = (await tmdbRes.json()) as { results?: Record<string, unknown>[] };
-        const filtered = (data.results || []).filter(
-          (item) => item.media_type === 'movie' || item.media_type === 'tv'
-        );
-        if (filtered.length > 0) {
-          searchCache.set(cacheKey, { results: filtered, fetchedAt: Date.now() });
-          res.json({ results: filtered });
-          return;
-        }
+    const tmdbData = await fetchTMDB<{ results?: Record<string, unknown>[] }>(
+      'search/multi',
+      { query, page, include_adult: false },
+      5500
+    );
+    if (tmdbData?.results) {
+      const filtered = tmdbData.results.filter(
+        (item) => item.media_type === 'movie' || item.media_type === 'tv'
+      );
+      if (filtered.length > 0) {
+        searchCache.set(cacheKey, { results: filtered, fetchedAt: Date.now() });
+        res.json({ results: filtered });
+        return;
       }
-    } catch {}
+    }
 
     // Seamless Zero-Key Cinemeta Search Fallback
     const cmResults = await searchCinemeta(query, 'all');
@@ -759,22 +865,16 @@ async function startServer() {
       }
 
       if (!tmdbId && initialImdbId.startsWith('tt')) {
-        try {
-          const findRes = await fetch(
-            `https://api.themoviedb.org/3/find/${encodeURIComponent(initialImdbId)}?api_key=${DEFAULT_TMDB_KEY}&external_source=imdb_id`,
-            { signal: AbortSignal.timeout(4000) }
-          );
-          if (findRes.ok) {
-            const findData = (await findRes.json()) as {
-              movie_results?: Array<{ id: number }>;
-              tv_results?: Array<{ id: number }>;
-            };
-            const list = type === 'tv' ? findData.tv_results : findData.movie_results;
-            if (list && list[0]?.id > 0) {
-              tmdbId = list[0].id;
-            }
+        const findData = await fetchTMDB<{
+          movie_results?: Array<{ id: number }>;
+          tv_results?: Array<{ id: number }>;
+        }>(`find/${encodeURIComponent(initialImdbId)}`, { external_source: 'imdb_id' }, 4000);
+        if (findData) {
+          const list = type === 'tv' ? findData.tv_results : findData.movie_results;
+          if (list && list[0]?.id > 0) {
+            tmdbId = list[0].id;
           }
-        } catch {}
+        }
       }
 
       if (!tmdbId && initialImdbId.startsWith('tt')) {

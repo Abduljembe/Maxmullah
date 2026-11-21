@@ -248,12 +248,30 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
               )}
 
               <div>
-                <span className="text-slate-400 block mb-0.5">Cast:</span>
-                <span className="text-white font-medium">{media.cast.join(', ')}</span>
+                <span className="text-slate-400 block mb-1.5">Cast:</span>
+                {media.castProfiles && media.castProfiles.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {media.castProfiles.slice(0, 4).map((person) => (
+                      <div key={person.name} className="flex items-center gap-2 pr-2 py-0.5 rounded-lg bg-white/5">
+                        {person.profileUrl && (
+                          <img
+                            src={person.profileUrl}
+                            alt={person.name}
+                            referrerPolicy="no-referrer"
+                            className="w-6 h-6 rounded-md object-cover shrink-0"
+                          />
+                        )}
+                        <span className="text-white font-medium truncate max-w-[130px]">{person.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-white font-medium">{media.cast.join(', ')}</span>
+                )}
               </div>
 
               <div>
-                <span className="text-slate-400 block mb-0.5">Audio & Visual:</span>
+                <span className="text-slate-400 block mb-0.5">Audio &amp; Visual:</span>
                 <span className="text-rose-400 font-semibold">{media.features.join(' · ')}</span>
               </div>
             </div>

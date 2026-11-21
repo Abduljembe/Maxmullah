@@ -41,9 +41,11 @@ import { TrendingAndNewSection, SeeAllTarget } from './components/views/Trending
 import { NetworksView } from './components/views/NetworksView';
 import { TMDBSettingsModal } from './components/modals/TMDBSettingsModal';
 import {
+  buildTMDBImageUrl,
   fetchLiveTrending,
   fetchServerMovies,
   fetchServerIndexedCatalog,
+  initTMDBConfiguration,
 } from './services/tmdbService';
 import { getBecauseYouWatched } from './utils/recommendationEngine';
 import { installAdShield } from './utils/adBlocker';
@@ -56,9 +58,10 @@ function MainAppContent() {
   const { currentProfile, activeMood } = useProfile();
   const { isOffline } = useOffline();
 
-  // Install anti-ad shield on application boot
+  // Install anti-ad shield & sync TMDB /3/configuration on application boot
   useEffect(() => {
     installAdShield();
+    initTMDBConfiguration();
   }, []);
 
   const [vidLinkProgressMap, setVidLinkProgressMap] = useState<
@@ -278,14 +281,10 @@ function MainAppContent() {
     return entries.map((entry) => {
       const existing = catalog.find((m) => m.tmdbId === entry.id || m.id === String(entry.id));
       const poster = entry.poster_path
-        ? entry.poster_path.startsWith('http')
-          ? entry.poster_path
-          : `https://image.tmdb.org/t/p/w500${entry.poster_path}`
+        ? buildTMDBImageUrl(entry.poster_path, 'poster', 'w500')
         : existing?.posterUrl || '';
       const backdrop = entry.backdrop_path
-        ? entry.backdrop_path.startsWith('http')
-          ? entry.backdrop_path
-          : `https://image.tmdb.org/t/p/original${entry.backdrop_path}`
+        ? buildTMDBImageUrl(entry.backdrop_path, 'backdrop', 'original')
         : existing?.backdropUrl || poster;
 
       const mediaItem: MediaItem = existing || {

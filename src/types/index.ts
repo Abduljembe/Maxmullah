@@ -29,6 +29,29 @@ export interface Season {
   episodes: Episode[];
 }
 
+export interface TMDBImageConfig {
+  base_url: string;
+  secure_base_url: string;
+  backdrop_sizes: string[];
+  logo_sizes: string[];
+  poster_sizes: string[];
+  profile_sizes: string[];
+  still_sizes: string[];
+}
+
+export interface TMDBConfiguration {
+  images: TMDBImageConfig;
+  change_keys: string[];
+  authConfigured?: boolean;
+  authMode?: 'bearer' | 'api_key' | 'fallback';
+}
+
+export interface CastMemberProfile {
+  name: string;
+  character?: string;
+  profileUrl?: string;
+}
+
 export interface MediaItem {
   id: string;
   title: string;
@@ -47,10 +70,12 @@ export interface MediaItem {
   description: string;
   tagline: string;
   cast: string[];
+  castProfiles?: CastMemberProfile[];
   director?: string;
   creator?: string;
   posterUrl: string;
   backdropUrl: string;
+  logoUrl?: string;
   videoPreviewUrl: string;
   seasons?: Season[];
   audioTracks: string[];
