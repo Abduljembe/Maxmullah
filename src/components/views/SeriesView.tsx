@@ -69,10 +69,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
   const pageRef = useRef(1);
   const totalPagesRef = useRef(500);
   const isFetchingMoreRef = useRef(false);
-  const emptyStreakRef = useRef(0);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
-  const fallbackSeriesRef = useRef(initialCatalogSeries);
-  fallbackSeriesRef.current = initialCatalogSeries;
 
   useEffect(() => {
     setActiveFeed(initialFeed);
@@ -147,7 +144,6 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
       if (pageToLoad === 1 && !append) {
         setIsLoading(true);
         isFetchingMoreRef.current = false;
-        emptyStreakRef.current = 0;
       } else {
         if (isFetchingMoreRef.current) return;
         isFetchingMoreRef.current = true;
@@ -169,7 +165,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
             totalPagesRef.current = maxTotal;
             setHasMorePages(loadedPage < maxTotal);
           } else {
-            const localFiltered = fallbackSeriesRef.current.filter((m) => {
+            const localFiltered = initialCatalogSeries.filter((m) => {
               if (m.type !== 'series') return false;
               if (debouncedQuery && !m.title.toLowerCase().includes(debouncedQuery.toLowerCase())) {
                 return false;
@@ -184,21 +180,19 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
           }
         } else {
           const result = await fetchBatchForPage(pageToLoad);
-          pageRef.current = pageToLoad;
-          totalPagesRef.current = Math.max(pageToLoad, result.totalPages || totalPagesRef.current);
           if (result.items.length > 0) {
-            emptyStreakRef.current = 0;
             setServerSeries((prev) => deduplicateMedia([...prev, ...result.items]));
+            pageRef.current = pageToLoad;
+            totalPagesRef.current = Math.max(pageToLoad, result.totalPages || 1);
             setHasMorePages(pageToLoad < totalPagesRef.current);
           } else {
-            emptyStreakRef.current += 1;
-            setHasMorePages(emptyStreakRef.current < 2 && pageToLoad < totalPagesRef.current);
+            setHasMorePages(false);
           }
         }
       } catch (err) {
         console.warn('SeriesView loadSeries error:', err);
         if (!append) {
-          setServerSeries(fallbackSeriesRef.current.filter((m) => m.type === 'series'));
+          setServerSeries(initialCatalogSeries.filter((m) => m.type === 'series'));
         }
         setHasMorePages(false);
       } finally {
@@ -207,7 +201,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
         isFetchingMoreRef.current = false;
       }
     },
-    [fetchBatchForPage, debouncedQuery, selectedPlatform]
+    [fetchBatchForPage, initialCatalogSeries, debouncedQuery, selectedPlatform]
   );
 
   useEffect(() => {
@@ -230,7 +224,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
     const sentinel = bottomSentinelRef.current;
     if (isLoading || !hasMorePages) return;
 
-    const checkNeedMore = () => {
+    const onWindowScroll = () => {
       if (isFetchingMoreRef.current) return;
       const scrollBottom = window.innerHeight + window.scrollY;
       const docHeight = document.documentElement.scrollHeight;
@@ -238,7 +232,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
         handleLoadMore();
       }
     };
-    window.addEventListener('scroll', checkNeedMore, { passive: true });
+    window.addEventListener('scroll', onWindowScroll, { passive: true });
 
     let observer: IntersectionObserver | null = null;
     if (sentinel && typeof IntersectionObserver !== 'undefined') {
@@ -253,17 +247,11 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
       observer.observe(sentinel);
     }
 
-    let rafId = 0;
-    if (!isLoadingMore) {
-      rafId = window.requestAnimationFrame(checkNeedMore);
-    }
-
     return () => {
-      window.removeEventListener('scroll', checkNeedMore);
-      if (rafId) window.cancelAnimationFrame(rafId);
+      window.removeEventListener('scroll', onWindowScroll);
       observer?.disconnect();
     };
-  }, [isLoading, isLoadingMore, hasMorePages, serverSeries.length, handleLoadMore]);
+  }, [isLoading, hasMorePages, serverSeries.length, handleLoadMore]);
 
   const feedTabs = [
     { id: 'all_feeds', label: 'All Series', icon: Layers },

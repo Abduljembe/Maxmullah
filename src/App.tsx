@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Sparkles,
   HardDrive,
@@ -210,38 +210,27 @@ function MainAppContent() {
     }
   };
 
-  const mergeCatalogItems = useCallback((incomingItems: MediaItem[]) => {
+  const mergeCatalogItems = (incomingItems: MediaItem[]) => {
     if (!incomingItems || incomingItems.length === 0) return;
     setCatalog((prev) => {
-      const seenIds = new Set<string>();
-      const seenTmdb = new Set<string>();
-      const seenTitles = new Set<string>();
-      for (const m of prev) {
-        seenIds.add(m.id);
-        if (m.tmdbId) seenTmdb.add(`${m.type}:${m.tmdbId}`);
-        seenTitles.add(`${m.type}:${m.title.toLowerCase()}`);
-      }
-
-      const toAppend: MediaItem[] = [];
-      for (const item of incomingItems) {
-        const tmdbKey = item.tmdbId ? `${item.type}:${item.tmdbId}` : '';
-        const titleKey = `${item.type}:${item.title.toLowerCase()}`;
-        if (
-          seenIds.has(item.id) ||
-          (tmdbKey && seenTmdb.has(tmdbKey)) ||
-          seenTitles.has(titleKey)
-        ) {
-          continue;
+      const map = new Map<string, MediaItem>();
+      prev.forEach((item) => map.set(item.id, item));
+      let added = false;
+      incomingItems.forEach((item) => {
+        const alreadyExists = Array.from(map.values()).some(
+          (m) =>
+            m.id === item.id ||
+            (m.tmdbId && item.tmdbId && m.tmdbId === item.tmdbId) ||
+            m.title.toLowerCase() === item.title.toLowerCase()
+        );
+        if (!alreadyExists) {
+          map.set(item.id, item);
+          added = true;
         }
-        seenIds.add(item.id);
-        if (tmdbKey) seenTmdb.add(tmdbKey);
-        seenTitles.add(titleKey);
-        toAppend.push(item);
-      }
-
-      return toAppend.length > 0 ? [...prev, ...toAppend] : prev;
+      });
+      return added ? Array.from(map.values()) : prev;
     });
-  }, []);
+  };
 
   useEffect(() => {
     loadLiveTMDB();
@@ -278,10 +267,6 @@ function MainAppContent() {
       .filter(Boolean) as MediaItem[];
     return items.length > 0 ? items : catalog.slice(0, 8);
   }, [catalog]);
-
-  const moviesOnly = useMemo(() => {
-    return platformFilteredCatalog.filter((m) => m.type === 'movie');
-  }, [platformFilteredCatalog]);
 
   const seriesOnly = useMemo(() => {
     return platformFilteredCatalog.filter((m) => m.type === 'series');
@@ -540,7 +525,7 @@ function MainAppContent() {
             onSelectMovie={setSelectedMedia}
             onPlayMovie={(m) => handlePlayMedia(m)}
             onDownloadMovie={(m) => setDownloadTarget({ media: m })}
-            initialCatalogMovies={moviesOnly}
+            initialCatalogMovies={catalog.filter((m) => m.type === 'movie')}
             initialFeed={moviesPreset.feed}
             initialGenreId={moviesPreset.genreId}
             initialVixLang={moviesPreset.vixLang}

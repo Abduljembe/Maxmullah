@@ -142,7 +142,6 @@ const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
 const searchCache = new Map<string, { results: Record<string, unknown>[]; fetchedAt: number }>();
 const malIdCache = new Map<string, { malId: number | null; fetchedAt: number }>();
-const serverSourcesCache = new Map<string, { data: Record<string, unknown>; fetchedAt: number }>();
 let tmdbConfigCache: { data: TMDBConfigurationPayload; fetchedAt: number } | null = null;
 
 const INDEX_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -150,7 +149,6 @@ const TMDB_CACHE_TTL_MS = 60 * 60 * 1000;
 const TMDB_CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const TMDB_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
-const SERVER_SOURCES_CACHE_TTL_MS = 10 * 60 * 1000;
 
 let streamsStoreCache: Record<string, SavedStreamEntry> | null = null;
 
@@ -333,46 +331,9 @@ interface CinemetaItem {
   description?: string;
   releaseInfo?: string;
   imdbRating?: string;
-  genre?: string[];
   genres?: string[];
   cast?: string[];
   director?: string[];
-}
-
-const TMDB_GENRE_ID_TO_CINEMETA: Record<number, string> = {
-  28: 'Action',
-  12: 'Adventure',
-  16: 'Animation',
-  35: 'Comedy',
-  80: 'Crime',
-  99: 'Documentary',
-  18: 'Drama',
-  10751: 'Family',
-  14: 'Fantasy',
-  36: 'History',
-  27: 'Horror',
-  10402: 'Music',
-  9648: 'Mystery',
-  10749: 'Romance',
-  878: 'Sci-Fi',
-  53: 'Thriller',
-  10752: 'War',
-  37: 'Western',
-  10759: 'Action',
-  10765: 'Sci-Fi',
-  10768: 'War',
-};
-
-const cinemetaChunkCache = new Map<string, { metas: CinemetaItem[]; fetchedAt: number }>();
-const cinemetaMetaCache = new Map<string, { meta: CinemetaItem | null; fetchedAt: number }>();
-
-function stableNumericIdFromString(seed: string): number {
-  let hash = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    hash ^= seed.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) || 1;
 }
 
 function mapCinemetaToTMDBShape(
@@ -383,31 +344,22 @@ function mapCinemetaToTMDBShape(
   const yearMatch = (meta.releaseInfo || '').match(/\d{4}/);
   const yearStr = yearMatch ? `${yearMatch[0]}-01-01` : '2024-01-01';
   const tmdbNumeric = meta.moviedb_id && meta.moviedb_id > 0 ? meta.moviedb_id : 0;
-  const imdbId = meta.imdb_id || meta.id;
-  const numericFallbackId = tmdbNumeric || stableNumericIdFromString(`${fallbackType}:${imdbId || meta.name || 'item'}`);
   const parsedRating = parseFloat(meta.imdbRating || '');
-  const genreNames =
-    (Array.isArray(meta.genres) && meta.genres.length > 0 ? meta.genres : meta.genre) || [];
-  const posterUrl =
-    meta.poster ||
-    (imdbId && imdbId.startsWith('tt')
-      ? `https://images.metahub.space/poster/medium/${imdbId}/img`
-      : null);
 
   return {
-    id: numericFallbackId,
+    id: tmdbNumeric,
     moviedb_id: tmdbNumeric || undefined,
-    imdb_id: imdbId,
+    imdb_id: meta.imdb_id || meta.id,
     media_type: isTv ? 'tv' : 'movie',
     title: !isTv ? meta.name : undefined,
     name: isTv ? meta.name : undefined,
-    poster_path: posterUrl,
-    backdrop_path: meta.background || posterUrl,
+    poster_path: meta.poster || null,
+    backdrop_path: meta.background || meta.poster || null,
     release_date: !isTv ? yearStr : undefined,
     first_air_date: isTv ? yearStr : undefined,
     overview: meta.description || '',
     vote_average: Number.isFinite(parsedRating) && parsedRating > 0 ? parsedRating : 0,
-    genres: genreNames.map((g, i) => ({ id: i + 1, name: g })),
+    genres: (meta.genres || []).map((g, i) => ({ id: i + 1, name: g })),
     credits: {
       cast: (meta.cast || []).slice(0, 4).map((name) => ({ name })),
       crew: (meta.director || []).slice(0, 1).map((name) => ({ name, job: 'Director' })),
@@ -420,25 +372,14 @@ async function fetchCinemetaMeta(
   imdbId: string
 ): Promise<CinemetaItem | null> {
   if (!imdbId || !imdbId.startsWith('tt')) return null;
-  const cacheKey = `${type}:${imdbId}`;
-  const cached = cinemetaMetaCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < TMDB_CACHE_TTL_MS) {
-    return cached.meta;
-  }
-
   const cmType = type === 'tv' ? 'series' : 'movie';
   try {
     const res = await fetch(`https://v3-cinemeta.strem.io/meta/${cmType}/${imdbId}.json`, {
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(4500),
     });
-    if (!res.ok) {
-      cinemetaMetaCache.set(cacheKey, { meta: null, fetchedAt: Date.now() });
-      return null;
-    }
+    if (!res.ok) return null;
     const data = (await res.json()) as { meta?: CinemetaItem };
-    const meta = data?.meta || null;
-    cinemetaMetaCache.set(cacheKey, { meta, fetchedAt: Date.now() });
-    return meta;
+    return data?.meta || null;
   } catch {
     return null;
   }
@@ -461,7 +402,8 @@ async function searchCinemeta(
         );
         if (!res.ok) return [];
         const data = (await res.json()) as { metas?: CinemetaItem[] };
-        const metas = (data?.metas || []).slice(0, 12);
+        const metas = (data?.metas || []).slice(0, 8);
+        // Hydrate moviedb_id in parallel for top hits so VidLink / VidFast / VixSrc work cleanly
         const hydrated = await Promise.all(
           metas.map(async (m) => {
             const full = await fetchCinemetaMeta(t, m.imdb_id || m.id);
@@ -478,93 +420,22 @@ async function searchCinemeta(
   return rawLists.flat();
 }
 
-async function fetchCinemetaCatalogChunk(
-  cmType: 'movie' | 'series',
-  catalogName: 'top' | 'year' | 'imdbRating',
-  skip: number,
-  genreName?: string
-): Promise<CinemetaItem[]> {
-  const extraParts: string[] = [];
-  if (genreName) extraParts.push(`genre=${encodeURIComponent(genreName)}`);
-  if (skip > 0) extraParts.push(`skip=${skip}`);
-  const extraSuffix = extraParts.length > 0 ? `/${extraParts.join('&')}` : '';
-  const url = `https://v3-cinemeta.strem.io/catalog/${cmType}/${catalogName}${extraSuffix}.json`;
-
-  const cached = cinemetaChunkCache.get(url);
-  if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
-    return cached.metas;
-  }
-
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(6500) });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { metas?: CinemetaItem[] };
-    const metas = Array.isArray(data?.metas) ? data.metas : [];
-    if (metas.length > 0) {
-      cinemetaChunkCache.set(url, { metas, fetchedAt: Date.now() });
-    }
-    return metas;
-  } catch {
-    return [];
-  }
-}
-
 async function fetchCinemetaCatalogFallback(
   type: 'movie' | 'tv',
-  options: {
-    catalogName?: 'top' | 'year' | 'imdbRating';
-    page?: number;
-    genreName?: string;
-  } = {}
-): Promise<{ page: number; results: Record<string, unknown>[]; total_pages: number; total_results: number }> {
+  catalogName: 'top' | 'imdbRating' = 'top'
+): Promise<{ results: Record<string, unknown>[]; total_pages: number; total_results: number }> {
   const cmType = type === 'tv' ? 'series' : 'movie';
-  const catalogName = options.catalogName || 'top';
-  const page = Math.max(1, options.page || 1);
-  const pageSize = 20;
-  const startIndex = (page - 1) * pageSize;
-  const endIndex = startIndex + pageSize;
-  const firstChunkSkip = Math.floor(startIndex / 50) * 50;
-  const secondChunkSkip = Math.floor((endIndex - 1) / 50) * 50;
-
   try {
-    const chunkPromises: Promise<CinemetaItem[]>[] = [
-      fetchCinemetaCatalogChunk(cmType, catalogName, firstChunkSkip, options.genreName),
-    ];
-    if (secondChunkSkip !== firstChunkSkip) {
-      chunkPromises.push(
-        fetchCinemetaCatalogChunk(cmType, catalogName, secondChunkSkip, options.genreName)
-      );
-    }
-
-    const chunks = await Promise.all(chunkPromises);
-    const firstChunk = chunks[0] || [];
-    const secondChunk = chunks[1] || [];
-
-    const combined: CinemetaItem[] =
-      secondChunkSkip !== firstChunkSkip ? [...firstChunk, ...secondChunk] : firstChunk;
-    const offsetInFirst = startIndex - firstChunkSkip;
-    let slice = combined.slice(offsetInFirst, offsetInFirst + pageSize);
-
-    // If a genre/sort combination returned nothing on page 1, fallback cleanly to top unfiltered
-    if (slice.length === 0 && options.genreName && page === 1) {
-      const topFallback = await fetchCinemetaCatalogChunk(cmType, 'top', 0);
-      slice = topFallback.slice(0, pageSize);
-    }
-
-    const results = slice.map((m) => mapCinemetaToTMDBShape(m, type));
-    const hasMoreEstimate =
-      results.length >= pageSize ||
-      (secondChunkSkip !== firstChunkSkip ? secondChunk.length >= 45 : firstChunk.length >= 45);
-    const totalPages = hasMoreEstimate ? Math.max(page + 25, 100) : page;
-
-    return {
-      page,
-      results,
-      total_pages: totalPages,
-      total_results: totalPages * pageSize,
-    };
+    const res = await fetch(`https://v3-cinemeta.strem.io/catalog/${cmType}/${catalogName}.json`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return { results: [], total_pages: 1, total_results: 0 };
+    const data = (await res.json()) as { metas?: CinemetaItem[] };
+    const metas = (data?.metas || []).slice(0, 20);
+    const results = metas.map((m) => mapCinemetaToTMDBShape(m, type));
+    return { results, total_pages: 1, total_results: results.length };
   } catch {
-    return { page, results: [], total_pages: 1, total_results: 0 };
+    return { results: [], total_pages: 1, total_results: 0 };
   }
 }
 
@@ -847,47 +718,17 @@ async function startServer() {
     }
 
     // Zero-key Cinemeta fallback if TMDB credentials are not set or TMDB is unreachable
-    const isTv =
-      tmdbSubpath.startsWith('tv') ||
-      tmdbSubpath.includes('/tv/') ||
-      tmdbSubpath.includes('discover/tv');
+    const isTv = tmdbSubpath.includes('tv');
     const queryParam = typeof req.query.query === 'string' ? req.query.query.trim() : '';
-    const pageParam = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
-
     if (queryParam) {
       const results = await searchCinemeta(queryParam, isTv ? 'tv' : 'movie');
-      res.json({ page: pageParam, results, total_pages: 1, total_results: results.length });
+      res.json({ results, total_pages: 1, total_results: results.length });
       return;
     }
-
-    const rawGenreIds = typeof req.query.with_genres === 'string' ? req.query.with_genres : '';
-    const firstGenreId = parseInt(rawGenreIds.split(',')[0] || '0', 10);
-    const genreName = firstGenreId > 0 ? TMDB_GENRE_ID_TO_CINEMETA[firstGenreId] : undefined;
-    const sortBy = typeof req.query.sort_by === 'string' ? req.query.sort_by : '';
-
-    let catalogName: 'top' | 'year' | 'imdbRating' = 'top';
-    if (
-      tmdbSubpath.includes('top_rated') ||
-      sortBy.includes('vote_average')
-    ) {
-      catalogName = 'imdbRating';
-    } else if (
-      tmdbSubpath.includes('now_playing') ||
-      tmdbSubpath.includes('upcoming') ||
-      tmdbSubpath.includes('on_the_air') ||
-      sortBy.includes('release_date')
-    ) {
-      catalogName = 'year';
-    }
-
-    const fallback = await fetchCinemetaCatalogFallback(isTv ? 'tv' : 'movie', {
-      catalogName,
-      page: pageParam,
-      genreName,
-    });
-    if (fallback.results.length > 0) {
-      tmdbProxyCache.set(cacheKey, { data: fallback, fetchedAt: Date.now() });
-    }
+    const fallback = await fetchCinemetaCatalogFallback(
+      isTv ? 'tv' : 'movie',
+      tmdbSubpath.includes('top_rated') ? 'imdbRating' : 'top'
+    );
     res.json(fallback);
   });
 
@@ -979,24 +820,6 @@ async function startServer() {
       );
 
       const items = hydrated.filter((item): item is Record<string, unknown> => item !== null);
-      if (items.length < 10) {
-        const cmFallback = await fetchCinemetaCatalogFallback(rawType, {
-          catalogName: 'top',
-          page,
-        });
-        const existingKeys = new Set(
-          items.map((it) => String(it.imdb_id || it.id || ''))
-        );
-        for (const extra of cmFallback.results) {
-          const k = String(extra.imdb_id || extra.id || '');
-          if (k && !existingKeys.has(k)) {
-            existingKeys.add(k);
-            items.push(extra);
-          }
-          if (items.length >= pageSize) break;
-        }
-      }
-
       res.json({
         items,
         page,
@@ -1061,47 +884,7 @@ async function startServer() {
         }
       }
 
-      const probeEmbedAvailability = async (url: string, timeoutMs = 2400): Promise<boolean> => {
-        try {
-          const r = await fetch(url, {
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            },
-            signal: AbortSignal.timeout(timeoutMs),
-          });
-          if (r.status !== 200) return false;
-          const html = await r.text();
-          if (html.length < 400) return false;
-          if (
-            /attention required|you have been blocked|cf-error-details|just a moment|404 not found|page not found|media unavailable|no media found/i.test(
-              html.slice(0, 4000)
-            )
-          ) {
-            return false;
-          }
-          return true;
-        } catch {
-          return false;
-        }
-      };
-
       const targetId = tmdbId > 0 ? String(tmdbId) : initialImdbId;
-      const cacheKey = `${type}:${targetId}:s${season}e${episode}:${isAnimeHint ? titleHint.toLowerCase() : ''}`;
-      const cachedSources = serverSourcesCache.get(cacheKey);
-      const streamsStore = await readStreamsStore();
-      const savedDirectCheck =
-        streamsStore[makeStreamKey(type, targetId, season, episode)] ||
-        (initialImdbId ? streamsStore[makeStreamKey(type, initialImdbId, season, episode)] : undefined);
-
-      if (cachedSources && Date.now() - cachedSources.fetchedAt < SERVER_SOURCES_CACHE_TTL_MS) {
-        res.json({
-          ...cachedSources.data,
-          directStreamUrl: savedDirectCheck?.url || cachedSources.data.directStreamUrl,
-        });
-        return;
-      }
-
       const targetParam = tmdbId > 0 ? `tmdb=${tmdbId}` : `imdb=${encodeURIComponent(initialImdbId)}`;
       const primeUrl =
         type === 'tv'
@@ -1111,38 +894,14 @@ async function startServer() {
         type === 'tv'
           ? `https://vidlink.pro/tv/${targetId}/${season}/${episode}`
           : `https://vidlink.pro/movie/${targetId}`;
-      const vidfastUrl =
-        type === 'tv'
-          ? `https://vidfast.pro/tv/${targetId}/${season}/${episode}`
-          : `https://vidfast.pro/movie/${targetId}`;
-      const videasyUrl =
-        type === 'tv'
-          ? `https://player.videasy.net/tv/${targetId}/${season}/${episode}`
-          : `https://player.videasy.net/movie/${targetId}`;
+
       const vixEmbedUrl =
         type === 'tv'
           ? `https://vixsrc.to/tv/${targetId}/${season}/${episode}`
           : `https://vixsrc.to/movie/${targetId}`;
-      const vidsrcShUrl =
-        type === 'tv'
-          ? `https://vidsrc.sh/embed/tv?tmdb=${targetId}&season=${season}&episode=${episode}`
-          : `https://vidsrc.sh/embed/movie?tmdb=${targetId}`;
-      const twoEmbedUrl =
-        type === 'tv'
-          ? `https://www.2embed.cc/embedtv/${targetId}&s=${season}&e=${episode}`
-          : `https://www.2embed.cc/embed/${targetId}`;
 
-      const [
-        primeResult,
-        vidlinkOk,
-        vidfastOk,
-        videasyOk,
-        vixEmbedOk,
-        vidsrcShOk,
-        twoEmbedOk,
-        resolvedImdb,
-        resolvedMalId,
-      ] = await Promise.all([
+      const [streamsStore, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb, resolvedMalId] = await Promise.all([
+        readStreamsStore(),
         fetch(primeUrl, {
           headers: {
             Referer:
@@ -1152,16 +911,32 @@ async function startServer() {
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
           },
-          signal: AbortSignal.timeout(2400),
+          signal: AbortSignal.timeout(4500),
         })
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null),
-        tmdbId > 0 ? probeEmbedAvailability(vidlinkUrl) : Promise.resolve(false),
-        tmdbId > 0 ? probeEmbedAvailability(vidfastUrl) : Promise.resolve(false),
-        tmdbId > 0 ? probeEmbedAvailability(videasyUrl) : Promise.resolve(false),
-        tmdbId > 0 ? probeEmbedAvailability(vixEmbedUrl, 2000) : Promise.resolve(false),
-        tmdbId > 0 ? probeEmbedAvailability(vidsrcShUrl) : Promise.resolve(false),
-        tmdbId > 0 ? probeEmbedAvailability(twoEmbedUrl) : Promise.resolve(false),
+        tmdbId > 0
+          ? fetch(vidlinkUrl, {
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+              },
+              signal: AbortSignal.timeout(4000),
+            })
+              .then((r) => r.status === 200)
+              .catch(() => false)
+          : Promise.resolve(false),
+        tmdbId > 0
+          ? fetch(vixEmbedUrl, {
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+              },
+              signal: AbortSignal.timeout(3000),
+            })
+              .then((r) => r.status === 200)
+              .catch(() => false)
+          : Promise.resolve(false),
         !initialImdbId && tmdbId > 0
           ? resolveImdbIdFromTMDB(type, tmdbId)
           : Promise.resolve(initialImdbId || null),
@@ -1185,7 +960,7 @@ async function startServer() {
 
       const finalImdbId = resolvedImdb || initialImdbId || undefined;
       const savedDirectEntry =
-        savedDirectCheck ||
+        streamsStore[makeStreamKey(type, targetId, season, episode)] ||
         (finalImdbId ? streamsStore[makeStreamKey(type, finalImdbId, season, episode)] : undefined);
 
       const inVixCatalog =
@@ -1193,37 +968,26 @@ async function startServer() {
         Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
       const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
-      const verifiedServers: Array<'vidlink' | 'vidfast' | 'videasy' | 'vixsrc' | 'vidsrc_sh' | '2embed'> = [];
-      if (vidlinkOk) verifiedServers.push('vidlink');
-      if (vidfastOk) verifiedServers.push('vidfast');
-      if (videasyOk) verifiedServers.push('videasy');
-      if (vixsrcAvailable) verifiedServers.push('vixsrc');
-      if (vidsrcShOk) verifiedServers.push('vidsrc_sh');
-      if (twoEmbedOk) verifiedServers.push('2embed');
+      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vidlink';
+      if (vidlinkOk) {
+        recommendedServer = 'vidlink';
+      } else if (vixsrcAvailable) {
+        recommendedServer = 'vixsrc';
+      } else {
+        recommendedServer = 'vidfast';
+      }
 
-      const availableServers =
-        verifiedServers.length > 0
-          ? verifiedServers
-          : (['vidlink', 'vidfast', 'vidsrc_sh', '2embed'] as const);
-
-      const recommendedServer = availableServers[0];
-
-      const payload = {
+      res.json({
         directStreamUrl: savedDirectEntry?.url,
         vidlinkAvailable: vidlinkOk,
-        vidfastAvailable: vidfastOk,
-        videasyAvailable: videasyOk,
         vixsrcAvailable,
-        availableServers,
         primeSrcHosts,
         resolvedTmdbId: tmdbId > 0 ? tmdbId : undefined,
         resolvedImdbId: finalImdbId,
         resolvedMalId: resolvedMalId || undefined,
         recommendedServer,
         info: primeInfo,
-      };
-      serverSourcesCache.set(cacheKey, { data: payload, fetchedAt: Date.now() });
-      res.json(payload);
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to probe server sources';
       res.status(502).json({
