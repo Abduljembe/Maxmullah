@@ -744,15 +744,15 @@ const EMBED_SHIELD_ALLOWED_HOSTS = new Set([
   'www.2embed.cc',
   'vidsrc.to',
   'www.vidsrc.to',
+  'vidsrc.su',
+  'www.vidsrc.su',
   'vidsrc.sh',
   'www.vidsrc.sh',
   'vidsrc.me',
   'www.vidsrc.me',
-  'vidsrc.xyz',
-  'www.vidsrc.xyz',
-  'multiembed.mov',
-  'www.multiembed.mov',
-  'player.videasy.net',
+  'player.autoembed.me',
+  'vidnest.fun',
+  'vidsrc.wtf',
   'vixsrc.to',
   'www.vixsrc.to',
 ]);
@@ -1295,18 +1295,12 @@ async function startServer() {
         (finalImdbId && vixStore.imdbSet.has(finalImdbId))));
       const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
-      const availableServers: Array<'vidlink' | 'vidfast' | 'vixsrc' | 'vidsrc_sh' | '2embed'> = [
-        'vidlink',
-        'vidfast',
-      ];
+      const availableServers: Array<
+        'vidsrc_su' | 'vidsrc_sh' | 'autoembed' | 'vidlink' | 'vidnest' | 'vixsrc'
+      > = ['vidsrc_su', 'vidsrc_sh', 'autoembed', 'vidlink', 'vidnest'];
       if (vixsrcAvailable) availableServers.push('vixsrc');
-      availableServers.push('vidsrc_sh', '2embed');
 
-      const recommendedServer: 'vixsrc' | 'vidfast' | 'vidlink' = vidlinkOk
-        ? 'vidlink'
-        : vixsrcAvailable
-        ? 'vixsrc'
-        : 'vidfast';
+      const recommendedServer: 'vidsrc_su' | 'vixsrc' | 'vidlink' = 'vidsrc_su';
 
       const payload = {
         directStreamUrl: directResolution?.url,
@@ -1314,7 +1308,7 @@ async function startServer() {
         directStreamSubtitleLabel: directResolution?.subtitleLabel,
         directStreamReferer: directResolution?.referer,
         vidlinkAvailable: vidlinkOk,
-        vidfastAvailable: true,
+        vidfastAvailable: false,
         vixsrcAvailable,
         availableServers,
         primeSrcHosts,
@@ -1331,9 +1325,10 @@ async function startServer() {
       const msg = err instanceof Error ? err.message : 'Unable to probe server sources';
       res.status(502).json({
         error: msg,
-        vidlinkAvailable: false,
+        vidlinkAvailable: true,
         vixsrcAvailable: false,
-        availableServers: ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'],
+        recommendedServer: 'vidsrc_su',
+        availableServers: ['vidsrc_su', 'vidsrc_sh', 'autoembed', 'vidlink', 'vidnest'],
         primeSrcHosts: [],
       });
     }
@@ -1771,13 +1766,14 @@ async function startServer() {
       );
       html = html.replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
 
-      // 2. Recursively shield nested allowlisted embed iframes (e.g. vidsrc.to -> vidsrc.sh)
+      // 2. Preserve direct player iframes (e.g. vidsrc.sh) so their relative fetch('/vs_src.php') calls succeed
       html = html.replace(
         /(<iframe\b[^>]*\bsrc\s*=\s*["'])([^"']+)(["'][^>]*>)/gi,
         (full, prefix: string, srcVal: string, suffix: string) => {
           try {
             const absUrl = new URL(srcVal, baseUrl).toString();
-            if (isAllowedEmbedShieldUrl(absUrl)) {
+            const parsedNested = isAllowedEmbedShieldUrl(absUrl);
+            if (parsedNested && !parsedNested.hostname.includes('vidsrc.sh')) {
               return `${prefix}/api/embed-shield?url=${encodeURIComponent(absUrl)}${suffix}`;
             }
           } catch {

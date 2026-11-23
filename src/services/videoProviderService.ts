@@ -2,26 +2,34 @@ import { MediaItem } from '../types';
 import { wrapWithEmbedShieldProxy } from '../utils/adBlocker';
 
 export type VideoStreamProvider =
+  | 'vidsrc_su'
+  | 'vidsrc_sh'
+  | 'autoembed'
   | 'vidlink'
-  | 'vidfast'
-  | 'videasy'
+  | 'vidnest'
+  | 'vidsrc_wtf'
   | 'vixsrc'
   | 'primesrc'
+  | 'vidfast'
+  | 'videasy'
   | 'superembed'
-  | 'vidsrc_sh'
   | '2embed'
   | 'vidsrc'
   | 'custom';
 
 export type VidukiServerId = 1 | 2 | 3 | 4;
 export type AnyServerId =
+  | 'vidsrc_su'
+  | 'vidsrc_sh'
+  | 'autoembed'
   | 'vidlink'
-  | 'vidfast'
-  | 'videasy'
+  | 'vidnest'
+  | 'vidsrc_wtf'
   | 'vixsrc'
   | 'primesrc'
+  | 'vidfast'
+  | 'videasy'
   | 'superembed'
-  | 'vidsrc_sh'
   | '2embed'
   | 'vidsrc';
 
@@ -37,22 +45,58 @@ export interface VidukiServerDefinition {
 
 export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
   {
-    id: 'vidlink',
-    name: 'VidLink Fast',
-    tag: 'Ad-Free · Instant',
-    badge: 'VidLink',
-    description: 'Clean minimal HD player with instant load and silent VidFast auto-fallback.',
+    id: 'vidsrc_su',
+    name: 'MullahStream Instant',
+    tag: 'Fastest · Autoplay HD',
+    badge: 'Fast HD',
+    description: 'Lightweight HTML5/HLS player with instant startup, multi-server core, and subtitles.',
     adFree: true,
-    latencyMs: 35,
+    latencyMs: 28,
   },
   {
-    id: 'vidfast',
-    name: 'VidFast Turbo',
-    tag: 'Ad-Free · Turbo',
-    badge: 'VidFast',
-    description: 'Zero popups with adaptive HLS streaming and auto-next episode.',
+    id: 'vidsrc_sh',
+    name: 'VidSrc Edge',
+    tag: 'Fast · Multi-Source',
+    badge: 'Edge HD',
+    description: 'High-speed edge mirror with automatic stream resolution.',
     adFree: true,
-    latencyMs: 45,
+    latencyMs: 42,
+  },
+  {
+    id: 'autoembed',
+    name: 'AutoEmbed HD',
+    tag: 'Fast · Global CDN',
+    badge: 'AutoEmbed',
+    description: 'Reliable global CDN mirror for movies and series.',
+    adFree: true,
+    latencyMs: 55,
+  },
+  {
+    id: 'vidlink',
+    name: 'VidLink Pro',
+    tag: 'HD · Multi-Audio',
+    badge: 'VidLink',
+    description: 'Full-featured HD/4K player with resume sync and anime MAL support.',
+    adFree: true,
+    latencyMs: 95,
+  },
+  {
+    id: 'vidnest',
+    name: 'VidNest HD',
+    tag: 'Backup · Multi-Host',
+    badge: 'VidNest',
+    description: 'Secondary HD/4K stream mirror for movies, TV, and anime.',
+    adFree: true,
+    latencyMs: 110,
+  },
+  {
+    id: 'vidsrc_wtf',
+    name: 'VidSrc Direct',
+    tag: 'Backup · Fast',
+    badge: 'VidSrc',
+    description: 'Clean direct fallback embed mirror.',
+    adFree: true,
+    latencyMs: 120,
   },
   {
     id: 'vixsrc',
@@ -61,57 +105,21 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
     badge: 'VixSrc',
     description: '4K & HD multi-audio stream (when available in your region).',
     adFree: true,
-    latencyMs: 85,
-  },
-  {
-    id: 'videasy',
-    name: 'Videasy',
-    tag: 'Ad-Free · Smooth',
-    badge: 'Videasy',
-    description: 'Smooth low-buffer stream with multi-language subtitles.',
-    adFree: true,
-    latencyMs: 95,
+    latencyMs: 135,
   },
   {
     id: 'primesrc',
     name: 'PrimeSrc Hosts',
-    tag: 'Backup · Host Captcha',
+    tag: 'Backup · Manual Hosts',
     badge: 'PrimeSrc',
-    description: 'Manual multi-host mirror (external hosts may show verification ads).',
+    description: 'Manual multi-host mirror.',
     adFree: false,
-    latencyMs: 140,
-  },
-  {
-    id: 'superembed',
-    name: 'MultiEmbed',
-    tag: 'Backup · Shielded',
-    badge: 'MultiEmbed',
-    description: 'Worldwide multi-region backup stream mirror.',
-    adFree: false,
-    latencyMs: 155,
-  },
-  {
-    id: 'vidsrc_sh',
-    name: 'VidSrc Edge',
-    tag: 'Backup · Shielded',
-    badge: 'VidSrc Edge',
-    description: 'Cloudflare edge backup mirror.',
-    adFree: false,
-    latencyMs: 165,
-  },
-  {
-    id: '2embed',
-    name: '2Embed',
-    tag: 'Backup · Shielded',
-    badge: '2Embed',
-    description: 'Secondary mirror across older catalog titles.',
-    adFree: false,
-    latencyMs: 175,
+    latencyMs: 160,
   },
   {
     id: 'vidsrc',
     name: 'VidSrc Pro',
-    tag: 'Backup · Shielded',
+    tag: 'Legacy · Shielded',
     badge: 'VidSrc Pro',
     description: 'Legacy IMDb/TMDB stream mirror.',
     adFree: false,
@@ -120,6 +128,14 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
 ];
 
 const VALID_SERVER_IDS = new Set<string>(VIDUKI_SERVERS.map((s) => s.id));
+const DEPRECATED_SERVER_IDS = new Set<string>(['vidfast', 'videasy', 'superembed', '2embed']);
+
+export function normalizeActiveServerId(raw?: string | null): AnyServerId {
+  if (raw && VALID_SERVER_IDS.has(raw) && !DEPRECATED_SERVER_IDS.has(raw)) {
+    return raw as AnyServerId;
+  }
+  return 'vidsrc_su';
+}
 
 export function isAdFreeServer(serverId: AnyServerId): boolean {
   return Boolean(VIDUKI_SERVERS.find((s) => s.id === serverId)?.adFree);
@@ -127,15 +143,14 @@ export function isAdFreeServer(serverId: AnyServerId): boolean {
 
 export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
   const order: AnyServerId[] = [
-    'vidlink',
-    'vidfast',
-    'vixsrc',
-    'videasy',
-    '2embed',
+    'vidsrc_su',
     'vidsrc_sh',
-    'superembed',
+    'autoembed',
+    'vidlink',
+    'vidnest',
+    'vidsrc_wtf',
+    'vixsrc',
     'vidsrc',
-    'primesrc',
   ];
   const idx = order.indexOf(currentServer);
   if (idx === -1 || idx === order.length - 1) {
@@ -213,13 +228,13 @@ export interface VidLinkMediaDataEvent {
   data: Record<string, VidLinkMediaProgressEntry> | VidLinkMediaProgressEntry;
 }
 
-const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v11';
+const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v12';
 const STORAGE_KEY_RESUME_PREFIX = 'mullahmax_resume_sec_';
 export const STORAGE_KEY_VIDLINK_PROGRESS = 'vidLinkProgress';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
-  provider: 'vidlink',
-  vidukiServer: 'vidlink',
+  provider: 'vidsrc_su',
+  vidukiServer: 'vidsrc_su',
   accentColor: 'FFFFFF',
   secondaryColor: '3F3F46',
   iconColor: 'FFFFFF',
@@ -236,7 +251,7 @@ const DEFAULT_CONFIG: VideoProviderConfig = {
   animeFallback: true,
   adShieldEnabled: true,
   customTemplate:
-    'https://vidlink.pro/movie/{id}?primaryColor=FFFFFF&secondaryColor=3F3F46&iconColor=FFFFFF&icons=vid&player=default&title=false&poster=false&autoplay=true&nextbutton=true',
+    'https://vidsrc.su/embed/movie/{id}?autoplay=true&pausescreen=false&colour=FFFFFF',
 };
 
 function sanitizeHexColor(raw: string | undefined, fallback: string): string {
@@ -264,11 +279,9 @@ export function getVideoProviderConfig(): VideoProviderConfig {
     const raw = localStorage.getItem(STORAGE_KEY_PROVIDER);
     if (raw) {
       const parsed = JSON.parse(raw);
-      const savedServer = VALID_SERVER_IDS.has(parsed.vidukiServer)
-        ? (parsed.vidukiServer as AnyServerId)
-        : 'vidfast';
+      const savedServer = normalizeActiveServerId(parsed.vidukiServer);
       return {
-        provider: VALID_SERVER_IDS.has(parsed.provider) ? parsed.provider : savedServer,
+        provider: normalizeActiveServerId(parsed.provider || savedServer),
         vidukiServer: savedServer,
         accentColor: sanitizeHexColor(parsed.accentColor, DEFAULT_CONFIG.accentColor),
         secondaryColor: sanitizeHexColor(parsed.secondaryColor, DEFAULT_CONFIG.secondaryColor),
@@ -303,7 +316,7 @@ export function getVideoProviderConfig(): VideoProviderConfig {
 
 export function saveVideoProviderConfig(config: VideoProviderConfig) {
   try {
-    const validServer = VALID_SERVER_IDS.has(config.vidukiServer) ? config.vidukiServer : 'vidfast';
+    const validServer = normalizeActiveServerId(config.vidukiServer);
     const cleaned: VideoProviderConfig = {
       ...config,
       vidukiServer: validServer,
@@ -539,8 +552,8 @@ export function buildVidLinkEmbedUrl(
 
   const fallbackTargetUrl =
     media.type === 'series'
-      ? `https://vidfast.pro/tv/${id}/${sNum}/${epNum}?autoPlay=${autoplay}&theme=${primaryColor}&nextButton=${nextbutton}&title=${title}`
-      : `https://vidfast.pro/movie/${id}?autoPlay=${autoplay}&theme=${primaryColor}&title=${title}`;
+      ? `https://vidsrc.su/embed/tv/${id}/${sNum}/${epNum}?autoplay=${autoplay}&autonextepisode=${nextbutton}&colour=${primaryColor}&pausescreen=false`
+      : `https://vidsrc.su/embed/movie/${id}?autoplay=${autoplay}&colour=${primaryColor}&pausescreen=false`;
 
   let basePath: string;
   if (shouldUseAnimeEndpoint && resolvedMalId) {
@@ -631,10 +644,55 @@ export function generateStreamSource(
   const sNum = Math.max(1, season);
   const epNum = Math.max(1, episode);
 
-  const requestedServer = overrideServer ?? cfg.vidukiServer ?? 'vidfast';
-  const server: AnyServerId = VALID_SERVER_IDS.has(requestedServer) ? requestedServer : 'vidfast';
+  const requestedServer = overrideServer ?? cfg.vidukiServer ?? 'vidsrc_su';
+  const server: AnyServerId = normalizeActiveServerId(requestedServer);
 
-  // 1. VidLink Pro (Full Movies, TV & Anime MAL API + Customization + Watch Progress)
+  // 1. VidSrc.su Instant HTML5/HLS Player (Lightweight Vite SPA, zero Cloudflare challenge)
+  if (server === 'vidsrc_su') {
+    const url =
+      media.type === 'series'
+        ? `https://vidsrc.su/embed/tv/${targetId}/${sNum}/${epNum}?autoplay=true&autonextepisode=true&colour=${color}&pausescreen=false`
+        : `https://vidsrc.su/embed/movie/${targetId}?autoplay=true&colour=${color}&pausescreen=false`;
+    return {
+      type: 'iframe',
+      url,
+      providerName: 'Fast HD',
+      serverId: 'vidsrc_su',
+      targetId,
+    };
+  }
+
+  // 2. VidSrc Edge (Direct embed — must NOT wrap in /api/embed-shield because it calls relative /vs_src.php)
+  if (server === 'vidsrc_sh') {
+    const url =
+      media.type === 'series'
+        ? `https://vidsrc.sh/embed/tv?tmdb=${targetId}&season=${sNum}&episode=${epNum}&autoplay=true`
+        : `https://vidsrc.sh/embed/movie?tmdb=${targetId}&autoplay=true`;
+    return {
+      type: 'iframe',
+      url,
+      providerName: 'Edge HD',
+      serverId: 'vidsrc_sh',
+      targetId,
+    };
+  }
+
+  // 3. AutoEmbed HD (Verified fast CDN mirror)
+  if (server === 'autoembed') {
+    const url =
+      media.type === 'series'
+        ? `https://player.autoembed.me/embed/tv/${targetId}/${sNum}/${epNum}`
+        : `https://player.autoembed.me/embed/movie/${targetId}`;
+    return {
+      type: 'iframe',
+      url,
+      providerName: 'AutoEmbed',
+      serverId: 'autoembed',
+      targetId,
+    };
+  }
+
+  // 4. VidLink Pro (Full Movies, TV & Anime MAL API + Customization + Watch Progress)
   if (server === 'vidlink') {
     const url = buildVidLinkEmbedUrl(media, targetId, sNum, epNum, customization);
     return {
@@ -646,37 +704,37 @@ export function generateStreamSource(
     };
   }
 
-  // 2. VidFast (Ad-Free Turbo Autoplay)
-  if (server === 'vidfast') {
+  // 5. VidNest HD (Multi-Host Backup)
+  if (server === 'vidnest') {
     const url =
       media.type === 'series'
-        ? `https://vidfast.pro/tv/${targetId}/${sNum}/${epNum}?autoPlay=true&theme=${color}&nextButton=true&title=false`
-        : `https://vidfast.pro/movie/${targetId}?autoPlay=true&theme=${color}&title=false`;
+        ? `https://vidnest.fun/tv/${targetId}/${sNum}/${epNum}`
+        : `https://vidnest.fun/movie/${targetId}`;
     return {
       type: 'iframe',
       url,
-      providerName: 'VidFast',
-      serverId: 'vidfast',
+      providerName: 'VidNest',
+      serverId: 'vidnest',
       targetId,
     };
   }
 
-  // 3. Videasy (Ad-Free Smooth)
-  if (server === 'videasy') {
+  // 6. VidSrc Direct
+  if (server === 'vidsrc_wtf') {
     const url =
       media.type === 'series'
-        ? `https://player.videasy.net/tv/${targetId}/${sNum}/${epNum}?color=${color}&nextEpisode=true&overlay=true`
-        : `https://player.videasy.net/movie/${targetId}?color=${color}&overlay=true`;
+        ? `https://vidsrc.wtf/api/1/tv/?id=${targetId}&s=${sNum}&e=${epNum}`
+        : `https://vidsrc.wtf/api/1/movie/?id=${targetId}`;
     return {
       type: 'iframe',
       url,
-      providerName: 'Videasy',
-      serverId: 'videasy',
+      providerName: 'VidSrc Direct',
+      serverId: 'vidsrc_wtf',
       targetId,
     };
   }
 
-  // 4. VixSrc (Ad-Free 4K Multi-Audio with full customization params & PLAYER_EVENT tracking)
+  // 7. VixSrc (Ad-Free 4K Multi-Audio with full customization params & PLAYER_EVENT tracking)
   if (server === 'vixsrc') {
     const url = buildVixSrcEmbedUrl(
       media.type,
@@ -694,7 +752,7 @@ export function generateStreamSource(
     };
   }
 
-  // 5. PrimeSrc (Hosts Filemoon, Voe, Dood, Luluvdoo, Streamtape, Mixdrop, Vinovo, Vidara, etc.)
+  // 8. PrimeSrc
   if (server === 'primesrc') {
     const isTmdb = !targetId.startsWith('tt');
     const idQuery = isTmdb ? `tmdb=${targetId}` : `imdb=${targetId}`;
@@ -713,53 +771,7 @@ export function generateStreamSource(
 
   const useShieldProxy = customization?.adShieldEnabled ?? cfg.adShieldEnabled ?? true;
 
-  // 6. MultiEmbed (Backup - wrapped with JS redirect ad shield when active)
-  if (server === 'superembed') {
-    const isTmdb = Boolean(media.tmdbId) || !targetId.startsWith('tt');
-    const rawUrl =
-      media.type === 'series'
-        ? `https://multiembed.mov/?video_id=${targetId}&tmdb=${isTmdb ? 1 : 0}&s=${sNum}&e=${epNum}`
-        : `https://multiembed.mov/?video_id=${targetId}&tmdb=${isTmdb ? 1 : 0}`;
-    return {
-      type: 'iframe',
-      url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
-      providerName: 'MultiEmbed',
-      serverId: 'superembed',
-      targetId,
-    };
-  }
-
-  // 7. VidSrc Edge (Backup - wrapped with JS redirect ad shield when active)
-  if (server === 'vidsrc_sh') {
-    const rawUrl =
-      media.type === 'series'
-        ? `https://vidsrc.sh/embed/tv?tmdb=${targetId}&season=${sNum}&episode=${epNum}&autoplay=true`
-        : `https://vidsrc.sh/embed/movie?tmdb=${targetId}&autoplay=true`;
-    return {
-      type: 'iframe',
-      url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
-      providerName: 'VidSrc Edge',
-      serverId: 'vidsrc_sh',
-      targetId,
-    };
-  }
-
-  // 8. 2Embed (Backup - wrapped with JS redirect ad shield when active)
-  if (server === '2embed') {
-    const rawUrl =
-      media.type === 'series'
-        ? `https://www.2embed.cc/embedtv/${targetId}&s=${sNum}&e=${epNum}`
-        : `https://www.2embed.cc/embed/${targetId}`;
-    return {
-      type: 'iframe',
-      url: useShieldProxy ? wrapWithEmbedShieldProxy(rawUrl) : rawUrl,
-      providerName: '2Embed',
-      serverId: '2embed',
-      targetId,
-    };
-  }
-
-  // 9. VidSrc Pro (Backup - wrapped with JS redirect ad shield when active)
+  // 9. VidSrc Pro (Legacy Backup - wrapped with JS redirect ad shield when active)
   const rawUrl =
     media.type === 'series'
       ? `https://vidsrc.to/embed/tv/${imdbFallback}/${sNum}/${epNum}`
@@ -1040,8 +1052,8 @@ export async function fetchLiveServerSources(
     return {
       vidlinkAvailable: true,
       vixsrcAvailable: false,
-      recommendedServer: 'vidlink',
-      availableServers: ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'],
+      recommendedServer: 'vidsrc_su',
+      availableServers: ['vidsrc_su', 'vidsrc_sh', 'autoembed', 'vidlink', 'vidnest'],
       primeSrcHosts: [],
     };
   })();

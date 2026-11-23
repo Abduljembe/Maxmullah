@@ -196,11 +196,12 @@ export function installAdShield() {
     document.addEventListener('auxclick', blockExternalAnchorEvent, true);
 
     const fastDomains = [
-      'https://vidfast.pro',
+      'https://vidsrc.su',
+      'https://themoviedb.vidsrc.su',
+      'https://vidsrc.sh',
+      'https://player.autoembed.me',
       'https://vidlink.pro',
-      'https://primesrc.me',
-      'https://player.videasy.net',
-      'https://vixsrc.to',
+      'https://vidnest.fun',
     ];
     fastDomains.forEach((domain) => prewarmStreamUrl(domain));
   } catch (err) {

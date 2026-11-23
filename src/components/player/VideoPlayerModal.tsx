@@ -62,7 +62,20 @@ interface TrackOption {
   label: string;
 }
 
-const DEFAULT_FALLBACK_QUEUE: AnyServerId[] = ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'];
+const DEFAULT_FALLBACK_QUEUE: AnyServerId[] = [
+  'vidsrc_su',
+  'vidsrc_sh',
+  'autoembed',
+  'vidlink',
+  'vidnest',
+];
+const DEPRECATED_QUEUE_SERVERS = new Set<AnyServerId>([
+  'vidfast',
+  'videasy',
+  'superembed',
+  '2embed',
+  'primesrc',
+]);
 const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2];
 
 export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
@@ -124,10 +137,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     () => !(isOffline && hasPlayableDownloadedFile) && !initialCachedSources && !hasImmediateTmdbId
   );
   const [serverQueue, setServerQueue] = useState<AnyServerId[]>(() => {
-    const cachedList = initialCachedSources?.availableServers?.filter((s) => s !== 'primesrc');
+    const cachedList = initialCachedSources?.availableServers?.filter(
+      (s) => !DEPRECATED_QUEUE_SERVERS.has(s)
+    );
     const base = cachedList && cachedList.length > 0 ? cachedList : DEFAULT_FALLBACK_QUEUE;
     const pref =
-      providerCfg.vidukiServer && providerCfg.vidukiServer !== 'primesrc'
+      providerCfg.vidukiServer && !DEPRECATED_QUEUE_SERVERS.has(providerCfg.vidukiServer)
         ? providerCfg.vidukiServer
         : null;
     return pref ? [pref, ...base.filter((s) => s !== pref)] : base;
@@ -135,6 +150,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [queueIndex, setQueueIndex] = useState<number>(0);
   const [iframeKey, setIframeKey] = useState<number>(0);
   const [iframeLoaded, setIframeLoaded] = useState<boolean>(false);
+  const [revealTimedOut, setRevealTimedOut] = useState<boolean>(false);
   const [directStreamUrl, setDirectStreamUrl] = useState<string>(initialDirectUrl);
   const [directSubtitleUrl, setDirectSubtitleUrl] = useState<string>(
     initialCachedSources?.directStreamSubtitleUrl || ''
@@ -181,7 +197,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return Math.max(localResume, vidLinkResume);
   });
 
-  const activeServer: AnyServerId = serverQueue[queueIndex] || 'vidlink';
+  const activeServer: AnyServerId = serverQueue[queueIndex] || 'vidsrc_su';
 
   useEffect(() => {
     const handleFsChange = () => {
@@ -209,7 +225,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
 
     const preferredInit =
-      providerCfg.vidukiServer && providerCfg.vidukiServer !== 'primesrc'
+      providerCfg.vidukiServer && !DEPRECATED_QUEUE_SERVERS.has(providerCfg.vidukiServer)
         ? providerCfg.vidukiServer
         : DEFAULT_FALLBACK_QUEUE[0];
     const startedSpeculatively = hasImmediateTmdbId && !isOffline;
@@ -238,11 +254,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
       const verified =
         res.availableServers && res.availableServers.length > 0
-          ? res.availableServers.filter((srv) => srv !== 'primesrc')
+          ? res.availableServers.filter((srv) => !DEPRECATED_QUEUE_SERVERS.has(srv))
           : DEFAULT_FALLBACK_QUEUE;
 
       const preferred =
-        providerCfg.vidukiServer && providerCfg.vidukiServer !== 'primesrc'
+        providerCfg.vidukiServer && !DEPRECATED_QUEUE_SERVERS.has(providerCfg.vidukiServer)
           ? providerCfg.vidukiServer
           : null;
       const ordered = preferred
@@ -257,6 +273,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       if (!canSkipReset || nextQueue[0] !== preferredInit) {
         setQueueIndex(0);
         setIframeLoaded(false);
+        setRevealTimedOut(false);
         setIframeKey((k) => k + 1);
       }
     };
@@ -270,6 +287,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     let cancelled = false;
     setIsResolvingServer(!startedSpeculatively);
     setIframeLoaded(false);
+    setRevealTimedOut(false);
     setQueueIndex(0);
 
     const resolveWithTimeout = Promise.race<LiveServerSourcesResponse>([
@@ -280,6 +298,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             resolve({
               vidlinkAvailable: true,
               vixsrcAvailable: false,
+              recommendedServer: DEFAULT_FALLBACK_QUEUE[0],
               availableServers: DEFAULT_FALLBACK_QUEUE,
               primeSrcHosts: [],
             }),
@@ -298,19 +317,33 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, hasImmediateTmdbId, providerCfg.subFile, providerCfg.subLabel, providerCfg.vidukiServer]);
 
-  // Fast silent failover across verified servers if embed frame stalls loading
+  // Never keep the stream embed hidden behind the loading curtain if a subresource tracker stalls onload
+  useEffect(() => {
+    setRevealTimedOut(false);
+    if (isResolvingServer || playerMode !== 'stream' || iframeLoaded) return;
+
+    const revealTimer = window.setTimeout(() => {
+      setRevealTimedOut(true);
+    }, 2000);
+
+    return () => window.clearTimeout(revealTimer);
+  }, [isResolvingServer, playerMode, iframeLoaded, activeServer, currentSeason, currentEpisode, iframeKey]);
+
+  // Silent failover across verified servers ONLY if an embed genuinely fails/stalls to boot
   useEffect(() => {
     if (isResolvingServer || playerMode !== 'stream' || iframeLoaded) return;
     if (queueIndex >= serverQueue.length - 1) return;
 
+    const stallMs = activeServer === 'vidlink' || activeServer === 'vidnest' ? 8500 : 5500;
     const timeout = window.setTimeout(() => {
       setQueueIndex((prev) => (prev < serverQueue.length - 1 ? prev + 1 : prev));
       setIframeLoaded(false);
+      setRevealTimedOut(false);
       setIframeKey((k) => k + 1);
-    }, 3200);
+    }, stallMs);
 
     return () => window.clearTimeout(timeout);
-  }, [isResolvingServer, playerMode, iframeLoaded, queueIndex, serverQueue.length, iframeKey]);
+  }, [isResolvingServer, playerMode, iframeLoaded, queueIndex, serverQueue.length, iframeKey, activeServer]);
 
   const allSeasons = useMemo(() => ensureMediaSeasons(media), [media]);
   const activeSeason = allSeasons.find((s) => s.seasonNumber === currentSeason) || allSeasons[0];
@@ -407,9 +440,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       const origin = event.origin || '';
       const isTrustedPlayerOrigin =
         origin === 'https://vidlink.pro' ||
+        origin.includes('vidsrc') ||
+        origin.includes('autoembed') ||
+        origin.includes('vidnest') ||
         origin.includes('vixsrc') ||
-        origin.includes('vidfast') ||
-        origin.includes('videasy');
+        origin.includes('stellarconductornexus') ||
+        origin.includes('nextgencloudfabric');
       if (origin && !isTrustedPlayerOrigin) return;
 
       const rawData = event.data as
@@ -420,11 +456,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       if (!rawData || typeof rawData !== 'object') return;
 
       if (
-        (rawData.type === 'ERROR' || (rawData as { event?: string }).event === 'error') &&
+        (rawData.type === 'ERROR' ||
+          rawData.type === 'VS_EXPIRED' ||
+          (rawData as { event?: string }).event === 'error') &&
         queueIndex < serverQueue.length - 1
       ) {
         setQueueIndex((prev) => (prev < serverQueue.length - 1 ? prev + 1 : prev));
         setIframeLoaded(false);
+        setRevealTimedOut(false);
         setIframeKey((k) => k + 1);
         return;
       }
@@ -902,7 +941,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   };
 
   const showDarkLoadingStage =
-    (playerMode === 'stream' && (isResolvingServer || !iframeLoaded)) ||
+    (playerMode === 'stream' && (isResolvingServer || (!iframeLoaded && !revealTimedOut))) ||
     ((playerMode === 'native' || playerMode === 'offline') && isLoading);
 
   const hideCursor =
@@ -941,11 +980,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             onLoad={(e) => {
               injectAdShieldIntoIframe(e.currentTarget);
               setIframeLoaded(true);
+              setRevealTimedOut(true);
             }}
             onError={() => {
               if (queueIndex < serverQueue.length - 1) {
                 setQueueIndex((prev) => prev + 1);
                 setIframeLoaded(false);
+                setRevealTimedOut(false);
                 setIframeKey((k) => k + 1);
               }
             }}
@@ -953,7 +994,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *; accelerometer; gyroscope; clipboard-write; web-share"
             allowFullScreen
             className={`w-full h-full border-0 bg-black transition-opacity duration-150 ${
-              iframeLoaded ? 'opacity-100' : 'opacity-0'
+              iframeLoaded || revealTimedOut ? 'opacity-100' : 'opacity-0'
             }`}
           />
         </div>
@@ -1377,6 +1418,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               onClick={() => {
                 setQueueIndex((prev) => (prev + 1) % serverQueue.length);
                 setIframeLoaded(false);
+                setRevealTimedOut(false);
                 setIframeKey((k) => k + 1);
               }}
               className="p-2.5 rounded-full bg-black/55 hover:bg-black/80 text-white/85 hover:text-white border border-white/10 backdrop-blur-md transition-colors cursor-pointer"
