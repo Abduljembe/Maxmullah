@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Play,
@@ -10,12 +10,19 @@ import {
   Share2,
   HardDrive,
   Star,
+  Link2,
+  Trash2,
 } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { PLATFORM_INFO } from '../../data/mediaData';
 import { useOffline } from '../../context/OfflineContext';
 import { useProfile } from '../../context/ProfileContext';
 import { ensureMediaSeasons } from '../../utils/seriesUtils';
+import {
+  getSavedDirectStream,
+  saveCustomDirectStream,
+  removeCustomDirectStream,
+} from '../../services/videoProviderService';
 
 interface MediaDetailModalProps {
   media: MediaItem;
@@ -44,6 +51,32 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
 
   const [selectedSeason, setSelectedSeason] = useState(1);
   const [copiedShare, setCopiedShare] = useState(false);
+  const [showDirectPanel, setShowDirectPanel] = useState(false);
+  const [hasDirectAttached, setHasDirectAttached] = useState(false);
+  const [directUrlInput, setDirectUrlInput] = useState('');
+  const [directSubInput, setDirectSubInput] = useState('');
+  const [directSaving, setDirectSaving] = useState(false);
+  const [directFeedback, setDirectFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const epNum = media.type === 'series' ? 1 : 1;
+    getSavedDirectStream(media, selectedSeason, epNum).then((entry) => {
+      if (!active) return;
+      if (entry?.url) {
+        setHasDirectAttached(true);
+        setDirectUrlInput(entry.url);
+        setDirectSubInput(entry.subtitleUrl || '');
+      } else {
+        setHasDirectAttached(false);
+        setDirectUrlInput('');
+        setDirectSubInput('');
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [media, selectedSeason]);
 
   const inWatchlist = isInWatchlist(media.id);
   const rating = getMediaRating(media.id);
@@ -69,6 +102,43 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
       );
       setCopiedShare(true);
       setTimeout(() => setCopiedShare(false), 2000);
+    }
+  };
+
+  const handleSaveDirectStream = async (playImmediately: boolean) => {
+    const cleanUrl = directUrlInput.trim();
+    if (!cleanUrl) {
+      setDirectFeedback({ type: 'err', text: 'Enter a valid http(s) .mp4 or .m3u8 stream URL.' });
+      return;
+    }
+    setDirectSaving(true);
+    setDirectFeedback(null);
+    const sNum = media.type === 'series' ? selectedSeason : 1;
+    const result = await saveCustomDirectStream(media, cleanUrl, sNum, 1, {
+      subtitleUrl: directSubInput.trim() || undefined,
+    });
+    setDirectSaving(false);
+    if (!result.ok) {
+      setDirectFeedback({ type: 'err', text: result.error || 'Could not save direct stream.' });
+      return;
+    }
+    setHasDirectAttached(true);
+    setDirectFeedback({ type: 'ok', text: 'Direct stream saved for native ad-free playback.' });
+    if (playImmediately) {
+      onPlay(media.type === 'series' ? selectedSeason : undefined, 1);
+    }
+  };
+
+  const handleRemoveDirectStream = async () => {
+    setDirectSaving(true);
+    const sNum = media.type === 'series' ? selectedSeason : 1;
+    const ok = await removeCustomDirectStream(media, sNum, 1);
+    setDirectSaving(false);
+    if (ok) {
+      setHasDirectAttached(false);
+      setDirectUrlInput('');
+      setDirectSubInput('');
+      setDirectFeedback({ type: 'ok', text: 'Removed attached direct stream.' });
     }
   };
 
@@ -197,9 +267,109 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
               >
                 {copiedShare ? <Check className="w-4 h-4 text-emerald-400" /> : <Share2 className="w-4 h-4" />}
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowDirectPanel((prev) => !prev)}
+                className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
+                  hasDirectAttached || showDirectPanel
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-white/10 hover:bg-white/20 text-slate-200 border-white/15'
+                }`}
+                title="Attach direct .mp4 or .m3u8 stream for native VLC-style playback"
+              >
+                <Link2 className="w-4 h-4" />
+                <span>{hasDirectAttached ? 'Direct Stream Ready' : 'Direct Media'}</span>
+              </button>
             </div>
           </div>
         </div>
+
+        {/* Collapsible Direct Media Stream Binder */}
+        {showDirectPanel && (
+          <div className="mx-6 sm:mx-8 mt-6 p-4 sm:p-5 rounded-2xl bg-white/[0.04] border border-white/15 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-white font-display">
+                  Attach Direct Media Stream (.m3u8 / .mp4)
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Plays directly in the built-in native player with CORS proxy fallback, hardware scrubbing, and zero ads.
+                </p>
+              </div>
+              {hasDirectAttached && (
+                <button
+                  type="button"
+                  onClick={handleRemoveDirectStream}
+                  disabled={directSaving}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-semibold cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Remove</span>
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                  Video / HLS Stream URL (.m3u8 or .mp4)
+                </label>
+                <input
+                  type="url"
+                  value={directUrlInput}
+                  onChange={(e) => setDirectUrlInput(e.target.value)}
+                  placeholder="https://cdn.example.com/movie/master.m3u8"
+                  className="w-full bg-black/50 border border-white/15 focus:border-white/50 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                  Optional Subtitle Track URL (.vtt)
+                </label>
+                <input
+                  type="url"
+                  value={directSubInput}
+                  onChange={(e) => setDirectSubInput(e.target.value)}
+                  placeholder="https://cdn.example.com/subtitles/en.vtt"
+                  className="w-full bg-black/50 border border-white/15 focus:border-white/50 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                />
+              </div>
+            </div>
+
+            {directFeedback && (
+              <div
+                className={`text-xs px-3 py-2 rounded-xl border ${
+                  directFeedback.type === 'ok'
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/15 border-rose-500/30 text-rose-300'
+                }`}
+              >
+                {directFeedback.text}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => handleSaveDirectStream(false)}
+                disabled={directSaving}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold border border-white/15 cursor-pointer disabled:opacity-50"
+              >
+                Save Link
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSaveDirectStream(true)}
+                disabled={directSaving}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white text-slate-950 hover:bg-slate-200 text-xs font-bold cursor-pointer disabled:opacity-50"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Save &amp; Play in Native Player</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Content Body */}
         <div className="p-6 sm:p-8 space-y-8">

@@ -133,7 +133,17 @@ interface PrimeSrcHost {
 interface SavedStreamEntry {
   url: string;
   title?: string;
+  subtitleUrl?: string;
+  subtitleLabel?: string;
+  referer?: string;
   updatedAt: string;
+}
+
+interface DirectMediaResolution {
+  url: string;
+  subtitleUrl?: string;
+  subtitleLabel?: string;
+  referer?: string;
 }
 
 const vixsrcIndexCache = new Map<string, VixSrcIndexStore>();
@@ -420,20 +430,90 @@ async function searchCinemeta(
   return rawLists.flat();
 }
 
+const CINEMETA_GENRE_NAMES: Record<number, string> = {
+  28: 'Action',
+  12: 'Adventure',
+  16: 'Animation',
+  35: 'Comedy',
+  80: 'Crime',
+  99: 'Documentary',
+  18: 'Drama',
+  10751: 'Family',
+  14: 'Fantasy',
+  36: 'History',
+  27: 'Horror',
+  10402: 'Music',
+  9648: 'Mystery',
+  10749: 'Romance',
+  878: 'Sci-Fi',
+  53: 'Thriller',
+  10752: 'War',
+  37: 'Western',
+  10759: 'Action',
+  10765: 'Sci-Fi',
+};
+
 async function fetchCinemetaCatalogFallback(
   type: 'movie' | 'tv',
-  catalogName: 'top' | 'imdbRating' = 'top'
+  tmdbSubpath: string,
+  params: Record<string, string> = {}
 ): Promise<{ results: Record<string, unknown>[]; total_pages: number; total_results: number }> {
   const cmType = type === 'tv' ? 'series' : 'movie';
+  const page = Math.max(1, parseInt(params.page || '1', 10) || 1);
+  const firstGenreId = parseInt(String(params.with_genres || '').split(',')[0] || '0', 10);
+  const genreName = CINEMETA_GENRE_NAMES[firstGenreId];
+  const sortBy = params.sort_by || '';
+
+  const startOffset = (page - 1) * 20;
+  const skip = Math.floor(startOffset / 50) * 50;
+  const sliceStart = startOffset % 50;
+
+  let url = '';
+  if (genreName) {
+    url = `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top/genre=${encodeURIComponent(genreName)}.json`;
+  } else if (tmdbSubpath.includes('top_rated') || sortBy.includes('vote_average')) {
+    url =
+      skip > 0
+        ? `https://cinemeta-catalogs.strem.io/imdbRating/catalog/${cmType}/imdbRating/skip=${skip}.json`
+        : `https://cinemeta-catalogs.strem.io/imdbRating/catalog/${cmType}/imdbRating.json`;
+  } else if (
+    tmdbSubpath.includes('now_playing') ||
+    tmdbSubpath.includes('upcoming') ||
+    sortBy.includes('release_date')
+  ) {
+    url =
+      skip > 0
+        ? `https://cinemeta-catalogs.strem.io/year/catalog/${cmType}/year/skip=${skip}.json`
+        : `https://cinemeta-catalogs.strem.io/year/catalog/${cmType}/year.json`;
+  } else if (tmdbSubpath.includes('trending') && tmdbSubpath.includes('week')) {
+    const weekOffset = startOffset + 20;
+    const weekSkip = Math.floor(weekOffset / 50) * 50;
+    url =
+      weekSkip > 0
+        ? `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top/skip=${weekSkip}.json`
+        : `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top.json`;
+  } else {
+    url =
+      skip > 0
+        ? `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top/skip=${skip}.json`
+        : `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top.json`;
+  }
+
   try {
-    const res = await fetch(`https://v3-cinemeta.strem.io/catalog/${cmType}/${catalogName}.json`, {
-      signal: AbortSignal.timeout(6000),
-    });
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) return { results: [], total_pages: 1, total_results: 0 };
     const data = (await res.json()) as { metas?: CinemetaItem[] };
-    const metas = (data?.metas || []).slice(0, 20);
+    const allMetas = Array.isArray(data?.metas) ? data.metas : [];
+    const offset = tmdbSubpath.includes('trending') && tmdbSubpath.includes('week') && !genreName
+      ? (startOffset + 20) % 50
+      : sliceStart;
+    const metas = allMetas.slice(offset, offset + 20);
     const results = metas.map((m) => mapCinemetaToTMDBShape(m, type));
-    return { results, total_pages: 1, total_results: results.length };
+    return {
+      results,
+      total_pages: genreName ? Math.max(1, Math.ceil(allMetas.length / 20)) : 20,
+      total_results: genreName ? allMetas.length : 400,
+    };
   } catch {
     return { results: [], total_pages: 1, total_results: 0 };
   }
@@ -479,6 +559,178 @@ function isAllowedRemoteUrl(rawUrl: string): URL | null {
   } catch {
     return null;
   }
+}
+
+async function fetchWithValidatedRedirects(
+  initialUrl: URL,
+  headers: Record<string, string>,
+  timeoutMs = 15000
+): Promise<{ response: globalThis.Response; finalUrl: URL } | null> {
+  let currentUrl = initialUrl;
+  for (let hop = 0; hop < 4; hop++) {
+    const candidate = await fetch(currentUrl.toString(), {
+      method: 'GET',
+      redirect: 'manual',
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (candidate.status >= 300 && candidate.status < 400) {
+      const location = candidate.headers.get('location');
+      if (!location) break;
+      const nextUrl = isAllowedRemoteUrl(new URL(location, currentUrl).toString());
+      if (!nextUrl) return null;
+      currentUrl = nextUrl;
+      continue;
+    }
+
+    return { response: candidate, finalUrl: currentUrl };
+  }
+  return null;
+}
+
+function rewriteHlsPlaylistForProxy(
+  playlistText: string,
+  baseUrl: URL,
+  proxyPathPrefix: string,
+  extraQuerySuffix = ''
+): string {
+  const toProxiedUrl = (rawUri: string): string => {
+    try {
+      const abs = new URL(rawUri.trim(), baseUrl).toString();
+      if (!isAllowedRemoteUrl(abs)) return rawUri;
+      return `${proxyPathPrefix}?url=${encodeURIComponent(abs)}${extraQuerySuffix}`;
+    } catch {
+      return rawUri;
+    }
+  };
+
+  return playlistText
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+      if (trimmed.startsWith('#')) {
+        return line.replace(/URI="([^"]+)"/gi, (_full, uri: string) => `URI="${toProxiedUrl(uri)}"`);
+      }
+      return toProxiedUrl(trimmed);
+    })
+    .join('\n');
+}
+
+async function resolveDirectMediaSource(
+  type: 'movie' | 'tv',
+  tmdbId: number,
+  imdbId: string | undefined,
+  season: number,
+  episode: number,
+  savedEntry?: SavedStreamEntry
+): Promise<DirectMediaResolution | null> {
+  if (savedEntry?.url && isAllowedRemoteUrl(savedEntry.url)) {
+    return {
+      url: savedEntry.url,
+      subtitleUrl: savedEntry.subtitleUrl,
+      subtitleLabel: savedEntry.subtitleLabel,
+      referer: savedEntry.referer,
+    };
+  }
+
+  // Optional Server-Side Jellyfin Integration
+  const jellyfinBaseRaw = (process.env.JELLYFIN_URL || '').trim().replace(/\/+$/, '');
+  const jellyfinKey = (process.env.JELLYFIN_API_KEY || '').trim();
+  const jellyfinBase = jellyfinBaseRaw ? isAllowedRemoteUrl(jellyfinBaseRaw) : null;
+
+  if (jellyfinBase && jellyfinKey && tmdbId > 0) {
+    try {
+      const providerFilter = `tmdb.${tmdbId}`;
+      if (type === 'movie') {
+        const res = await fetch(
+          `${jellyfinBase.origin}/Items?AnyProviderIdEquals=${encodeURIComponent(providerFilter)}&IncludeItemTypes=Movie&Recursive=true`,
+          {
+            headers: { 'X-Emby-Token': jellyfinKey, Accept: 'application/json' },
+            signal: AbortSignal.timeout(2500),
+          }
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { Items?: Array<{ Id?: string }> };
+          const itemId = data.Items?.[0]?.Id;
+          if (itemId && /^[a-zA-Z0-9_-]+$/.test(itemId)) {
+            return { url: `/api/jellyfin-stream/${encodeURIComponent(itemId)}/master.m3u8` };
+          }
+        }
+      } else {
+        const seriesRes = await fetch(
+          `${jellyfinBase.origin}/Items?AnyProviderIdEquals=${encodeURIComponent(providerFilter)}&IncludeItemTypes=Series&Recursive=true`,
+          {
+            headers: { 'X-Emby-Token': jellyfinKey, Accept: 'application/json' },
+            signal: AbortSignal.timeout(2500),
+          }
+        );
+        if (seriesRes.ok) {
+          const seriesData = (await seriesRes.json()) as { Items?: Array<{ Id?: string }> };
+          const seriesId = seriesData.Items?.[0]?.Id;
+          if (seriesId && /^[a-zA-Z0-9_-]+$/.test(seriesId)) {
+            const epRes = await fetch(
+              `${jellyfinBase.origin}/Shows/${encodeURIComponent(seriesId)}/Episodes?Season=${season}`,
+              {
+                headers: { 'X-Emby-Token': jellyfinKey, Accept: 'application/json' },
+                signal: AbortSignal.timeout(2500),
+              }
+            );
+            if (epRes.ok) {
+              const epData = (await epRes.json()) as {
+                Items?: Array<{ Id?: string; IndexNumber?: number }>;
+              };
+              const matchedEp = epData.Items?.find((ep) => ep.IndexNumber === episode);
+              if (matchedEp?.Id && /^[a-zA-Z0-9_-]+$/.test(matchedEp.Id)) {
+                return { url: `/api/jellyfin-stream/${encodeURIComponent(matchedEp.Id)}/master.m3u8` };
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Optional Jellyfin server unreachable; fall through cleanly
+    }
+  }
+
+  // Optional Server-Side Direct CDN Base Probe (Cloudflare R2 / Bunny / S3)
+  const cdnBaseRaw = (process.env.MEDIA_CDN_BASE_URL || '').trim().replace(/\/+$/, '');
+  const cdnBase = cdnBaseRaw ? isAllowedRemoteUrl(cdnBaseRaw) : null;
+  if (cdnBase && (tmdbId > 0 || imdbId)) {
+    const idSlug = tmdbId > 0 ? String(tmdbId) : String(imdbId);
+    const candidates =
+      type === 'tv'
+        ? [
+            `${cdnBase.toString().replace(/\/+$/, '')}/tv/${idSlug}/s${season}e${episode}/master.m3u8`,
+            `${cdnBase.toString().replace(/\/+$/, '')}/tv/${idSlug}/s${season}e${episode}.mp4`,
+            `${cdnBase.toString().replace(/\/+$/, '')}/tv/${idSlug}/${season}/${episode}/master.m3u8`,
+            `${cdnBase.toString().replace(/\/+$/, '')}/tv/${idSlug}/${season}/${episode}.mp4`,
+          ]
+        : [
+            `${cdnBase.toString().replace(/\/+$/, '')}/movie/${idSlug}/master.m3u8`,
+            `${cdnBase.toString().replace(/\/+$/, '')}/movie/${idSlug}.mp4`,
+            `${cdnBase.toString().replace(/\/+$/, '')}/${idSlug}/master.m3u8`,
+            `${cdnBase.toString().replace(/\/+$/, '')}/${idSlug}.mp4`,
+          ];
+
+    for (const candidate of candidates) {
+      try {
+        const probe = await fetch(candidate, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(1600),
+        });
+        const ct = (probe.headers.get('content-type') || '').toLowerCase();
+        if (probe.ok && !ct.includes('text/html')) {
+          return { url: candidate };
+        }
+      } catch {
+        // Continue trying candidate paths
+      }
+    }
+  }
+
+  return null;
 }
 
 const EMBED_SHIELD_ALLOWED_HOSTS = new Set([
@@ -585,44 +837,84 @@ async function startServer() {
    */
   app.get('/api/streams', async (req, res) => {
     const id = typeof req.query.id === 'string' ? req.query.id.trim() : '';
+    const imdbId = typeof req.query.imdbId === 'string' ? req.query.imdbId.trim() : '';
     const type = req.query.type === 'series' || req.query.type === 'tv' ? 'tv' : 'movie';
     const season = Math.max(1, parseInt(String(req.query.season || '1'), 10) || 1);
     const episode = Math.max(1, parseInt(String(req.query.episode || '1'), 10) || 1);
     const store = await readStreamsStore();
 
-    if (!id) {
-      res.json({ streams: store });
+    if (!id && !imdbId) {
+      res.json({ streams: store, count: Object.keys(store).length });
       return;
     }
 
-    const key = makeStreamKey(type, id, season, episode);
-    res.json({ entry: store[key] || null });
+    const entry =
+      (id ? store[makeStreamKey(type, id, season, episode)] : undefined) ||
+      (imdbId ? store[makeStreamKey(type, imdbId, season, episode)] : undefined) ||
+      null;
+    res.json({ entry });
   });
 
   app.post('/api/streams', async (req, res) => {
-    const { id, type, season = 1, episode = 1, url, title } = (req.body || {}) as {
+    const {
+      id,
+      type,
+      season = 1,
+      episode = 1,
+      url,
+      title,
+      subtitleUrl,
+      subtitleLabel,
+      referer,
+    } = (req.body || {}) as {
       id?: string | number;
       type?: string;
       season?: number;
       episode?: number;
       url?: string;
       title?: string;
+      subtitleUrl?: string;
+      subtitleLabel?: string;
+      referer?: string;
     };
 
     const targetId = String(id || '').trim();
     const mediaType: 'movie' | 'tv' = type === 'series' || type === 'tv' ? 'tv' : 'movie';
     const cleanUrl = typeof url === 'string' ? url.trim() : '';
+    const cleanSubUrl = typeof subtitleUrl === 'string' ? subtitleUrl.trim() : '';
+    const cleanReferer = typeof referer === 'string' ? referer.trim() : '';
 
     if (!targetId || !isAllowedRemoteUrl(cleanUrl)) {
       res.status(400).json({ error: 'Valid id and public http(s) stream URL are required.' });
       return;
     }
 
+    if (cleanSubUrl && !isAllowedRemoteUrl(cleanSubUrl)) {
+      res.status(400).json({ error: 'Subtitle URL must be a valid public http(s) .vtt link.' });
+      return;
+    }
+
+    if (cleanReferer && !isAllowedRemoteUrl(cleanReferer)) {
+      res.status(400).json({ error: 'Referer URL must be a valid public http(s) origin.' });
+      return;
+    }
+
     const store = await readStreamsStore();
-    const key = makeStreamKey(mediaType, targetId, Math.max(1, Number(season) || 1), Math.max(1, Number(episode) || 1));
+    const key = makeStreamKey(
+      mediaType,
+      targetId,
+      Math.max(1, Number(season) || 1),
+      Math.max(1, Number(episode) || 1)
+    );
     const entry: SavedStreamEntry = {
       url: cleanUrl,
       title: typeof title === 'string' ? title.slice(0, 140) : undefined,
+      subtitleUrl: cleanSubUrl || undefined,
+      subtitleLabel:
+        typeof subtitleLabel === 'string' && subtitleLabel.trim()
+          ? subtitleLabel.trim().slice(0, 60)
+          : undefined,
+      referer: cleanReferer || undefined,
       updatedAt: new Date().toISOString(),
     };
     store[key] = entry;
@@ -727,7 +1019,8 @@ async function startServer() {
     }
     const fallback = await fetchCinemetaCatalogFallback(
       isTv ? 'tv' : 'movie',
-      tmdbSubpath.includes('top_rated') ? 'imdbRating' : 'top'
+      tmdbSubpath,
+      incomingParams
     );
     res.json(fallback);
   });
@@ -963,6 +1256,15 @@ async function startServer() {
         streamsStore[makeStreamKey(type, targetId, season, episode)] ||
         (finalImdbId ? streamsStore[makeStreamKey(type, finalImdbId, season, episode)] : undefined);
 
+      const directResolution = await resolveDirectMediaSource(
+        type,
+        tmdbId,
+        finalImdbId,
+        season,
+        episode,
+        savedDirectEntry
+      );
+
       const inVixCatalog =
         (tmdbId > 0 && vixStore.tmdbSet.has(tmdbId)) ||
         Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
@@ -978,7 +1280,10 @@ async function startServer() {
       }
 
       res.json({
-        directStreamUrl: savedDirectEntry?.url,
+        directStreamUrl: directResolution?.url,
+        directStreamSubtitleUrl: directResolution?.subtitleUrl,
+        directStreamSubtitleLabel: directResolution?.subtitleLabel,
+        directStreamReferer: directResolution?.referer,
         vidlinkAvailable: vidlinkOk,
         vixsrcAvailable,
         primeSrcHosts,
@@ -996,6 +1301,226 @@ async function startServer() {
         vixsrcAvailable: false,
         primeSrcHosts: [],
       });
+    }
+  });
+
+  /**
+   * CORS-Free HLS (.m3u8) & Byte-Range Media Proxy (/api/stream-proxy)
+   * Enables native <video> + hls.js playback for external CDNs, R2, Bunny, or S3 links
+   * that restrict browser Origin headers or require custom Referer headers.
+   */
+  app.options('/api/stream-proxy', (_req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, If-Range');
+    res.status(204).end();
+  });
+
+  app.get('/api/stream-proxy', async (req, res) => {
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    const rawRef = typeof req.query.ref === 'string' ? req.query.ref.trim() : '';
+    const parsedUrl = isAllowedRemoteUrl(rawUrl);
+    const parsedRef = rawRef ? isAllowedRemoteUrl(rawRef) : null;
+
+    if (!parsedUrl || (rawRef && !parsedRef)) {
+      res.status(400).json({ error: 'Valid public http(s) media URL is required.' });
+      return;
+    }
+
+    const reqHeaders: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      Referer: parsedRef ? parsedRef.toString() : `${parsedUrl.origin}/`,
+    };
+    const rangeHeader = req.headers.range;
+    if (typeof rangeHeader === 'string' && /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rangeHeader)) {
+      reqHeaders.Range = rangeHeader;
+    }
+    if (typeof req.headers['if-range'] === 'string') {
+      reqHeaders['If-Range'] = req.headers['if-range'];
+    }
+
+    try {
+      const result = await fetchWithValidatedRedirects(parsedUrl, reqHeaders, 15000);
+      if (!result) {
+        res.status(400).json({ error: 'Blocked redirect to unapproved destination.' });
+        return;
+      }
+
+      const { response: upstream, finalUrl } = result;
+      if (!upstream.ok && upstream.status !== 206) {
+        res.status(upstream.status).json({ error: `Media upstream returned HTTP ${upstream.status}.` });
+        return;
+      }
+
+      const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
+        res.status(422).json({
+          error: 'Upstream URL returned an HTML webpage instead of a playable media or playlist stream.',
+        });
+        return;
+      }
+
+      const isLikelyPlaylist =
+        contentType.includes('mpegurl') ||
+        contentType.includes('vnd.apple.mpegurl') ||
+        /\.m3u8(\?|$)/i.test(finalUrl.pathname + finalUrl.search);
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+
+      if (isLikelyPlaylist) {
+        const playlistText = await upstream.text();
+        if (playlistText.trimStart().startsWith('#EXTM3U')) {
+          const refSuffix = parsedRef ? `&ref=${encodeURIComponent(parsedRef.toString())}` : '';
+          const rewritten = rewriteHlsPlaylistForProxy(
+            playlistText,
+            finalUrl,
+            '/api/stream-proxy',
+            refSuffix
+          );
+          res.status(200);
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-store');
+          res.send(rewritten);
+          return;
+        }
+        // Not actually an M3U8 manifest; forward as plain text/subtitle
+        res.status(upstream.status);
+        res.setHeader('Content-Type', contentType || 'text/plain; charset=utf-8');
+        res.send(playlistText);
+        return;
+      }
+
+      if (!upstream.body) {
+        res.status(502).json({ error: 'Empty upstream media response body.' });
+        return;
+      }
+
+      res.status(upstream.status);
+      if (contentType) {
+        res.setHeader('Content-Type', contentType);
+      } else if (/\.vtt(\?|$)/i.test(finalUrl.pathname)) {
+        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+      } else {
+        res.setHeader('Content-Type', 'application/octet-stream');
+      }
+
+      const contentLength = upstream.headers.get('content-length');
+      const contentRange = upstream.headers.get('content-range');
+      const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      res.setHeader('Accept-Ranges', acceptRanges);
+      res.setHeader('Cache-Control', 'no-store');
+
+      const nodeStream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+      req.on('close', () => nodeStream.destroy());
+      nodeStream.pipe(res);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to proxy media stream';
+      if (!res.headersSent) {
+        res.status(502).json({ error: msg });
+      }
+    }
+  });
+
+  /**
+   * Server-Side Jellyfin Authenticated Media Proxy (/api/jellyfin-stream/:itemId/*)
+   * Keeps JELLYFIN_API_KEY strictly on the server while serving direct/HLS streams cleanly.
+   */
+  app.get('/api/jellyfin-stream/:itemId/*', async (req, res) => {
+    const jellyfinBaseRaw = (process.env.JELLYFIN_URL || '').trim().replace(/\/+$/, '');
+    const jellyfinKey = (process.env.JELLYFIN_API_KEY || '').trim();
+    const jellyfinBase = jellyfinBaseRaw ? isAllowedRemoteUrl(jellyfinBaseRaw) : null;
+    const itemId = typeof req.params.itemId === 'string' ? req.params.itemId.trim() : '';
+    const wildcardParams = req.params as Record<string, string>;
+    const subpath = (wildcardParams['0'] || 'master.m3u8').replace(/^\/+/, '');
+
+    if (!jellyfinBase || !jellyfinKey) {
+      res.status(503).json({ error: 'Jellyfin server is not configured.' });
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(itemId) || !subpath || subpath.includes('..')) {
+      res.status(400).json({ error: 'Invalid Jellyfin item or path.' });
+      return;
+    }
+
+    const targetUrl = new URL(`${jellyfinBase.origin}/Videos/${itemId}/${subpath}`);
+    for (const [k, v] of Object.entries(req.query)) {
+      if (typeof v === 'string' && k.toLowerCase() !== 'api_key') {
+        targetUrl.searchParams.set(k, v);
+      }
+    }
+    if (subpath.endsWith('master.m3u8') && !targetUrl.searchParams.has('MediaSourceId')) {
+      targetUrl.searchParams.set('MediaSourceId', itemId);
+    }
+
+    const reqHeaders: Record<string, string> = {
+      'X-Emby-Token': jellyfinKey,
+    };
+    if (typeof req.headers.range === 'string') {
+      reqHeaders.Range = req.headers.range;
+    }
+
+    try {
+      const upstream = await fetch(targetUrl.toString(), {
+        headers: reqHeaders,
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!upstream.ok && upstream.status !== 206) {
+        res.status(upstream.status).json({ error: `Jellyfin returned HTTP ${upstream.status}` });
+        return;
+      }
+
+      const ct = (upstream.headers.get('content-type') || '').toLowerCase();
+      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      if (ct.includes('mpegurl') || subpath.endsWith('.m3u8')) {
+        const playlist = await upstream.text();
+        const rewritten = playlist
+          .split(/\r?\n/)
+          .map((line) => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            try {
+              const resolved = new URL(trimmed, targetUrl);
+              if (resolved.origin !== jellyfinBase.origin) return line;
+              const prefix = `/Videos/${itemId}/`;
+              const rel = resolved.pathname.startsWith(prefix)
+                ? resolved.pathname.slice(prefix.length)
+                : resolved.pathname.replace(/^\/+/, '');
+              return `/api/jellyfin-stream/${encodeURIComponent(itemId)}/${rel}${resolved.search}`;
+            } catch {
+              return line;
+            }
+          })
+          .join('\n');
+        res.status(200);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.send(rewritten);
+        return;
+      }
+
+      if (!upstream.body) {
+        res.status(502).end();
+        return;
+      }
+      res.status(upstream.status);
+      if (ct) res.setHeader('Content-Type', ct);
+      const cl = upstream.headers.get('content-length');
+      const cr = upstream.headers.get('content-range');
+      if (cl) res.setHeader('Content-Length', cl);
+      if (cr) res.setHeader('Content-Range', cr);
+      res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges') || 'bytes');
+
+      const nodeStream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+      req.on('close', () => nodeStream.destroy());
+      nodeStream.pipe(res);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Jellyfin proxy error';
+      if (!res.headersSent) res.status(502).json({ error: msg });
     }
   });
 

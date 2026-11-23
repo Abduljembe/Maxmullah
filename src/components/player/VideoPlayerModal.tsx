@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Settings,
   Captions,
+  Check,
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { MediaItem } from '../../types';
@@ -38,6 +39,7 @@ import {
   getVidLinkResumeSeconds,
   saveVidLinkMediaData,
   isLikelyAnime,
+  buildProxiedMediaUrl,
 } from '../../services/videoProviderService';
 import { injectAdShieldIntoIframe, prewarmStreamUrl } from '../../utils/adBlocker';
 
@@ -49,7 +51,18 @@ interface VideoPlayerModalProps {
   onSelectEpisode?: (seasonNum: number, episodeNum: number) => void;
 }
 
+interface HlsQualityOption {
+  index: number;
+  label: string;
+}
+
+interface TrackOption {
+  id: number;
+  label: string;
+}
+
 const DEFAULT_FALLBACK_QUEUE: AnyServerId[] = ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'];
+const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2];
 
 export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   media,
@@ -61,6 +74,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const clickTimerRef = useRef<number | null>(null);
+  const resumeAppliedRef = useRef<boolean>(false);
+  const controlsTimeoutRef = useRef<number | null>(null);
+  const lastSavedProgressSecRef = useRef<number>(0);
 
   const { isMediaDownloaded, getDownloadedMedia, isOffline } = useOffline();
   const { updateWatchProgress } = useProfile();
@@ -90,12 +107,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [playerMode, setPlayerMode] = useState<'stream' | 'native' | 'offline'>(() =>
     isOffline && hasPlayableDownloadedFile
       ? 'offline'
-      : initialDirectUrl
+      : initialDirectUrl || isDirectStreamUrl(media.videoPreviewUrl)
       ? 'native'
       : 'stream'
   );
 
-  // Automatic server resolution & silent failover queue (zero manual server selection)
+  // Automatic server resolution & silent failover queue
   const [isResolvingServer, setIsResolvingServer] = useState<boolean>(
     () => !(isOffline && hasPlayableDownloadedFile) && !initialCachedSources
   );
@@ -107,11 +124,23 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [iframeKey, setIframeKey] = useState<number>(0);
   const [iframeLoaded, setIframeLoaded] = useState<boolean>(false);
   const [directStreamUrl, setDirectStreamUrl] = useState<string>(initialDirectUrl);
+  const [directSubtitleUrl, setDirectSubtitleUrl] = useState<string>(
+    initialCachedSources?.directStreamSubtitleUrl || ''
+  );
+  const [directSubtitleLabel, setDirectSubtitleLabel] = useState<string>(
+    initialCachedSources?.directStreamSubtitleLabel || 'Subtitles'
+  );
+  const [directReferer, setDirectReferer] = useState<string>(
+    initialCachedSources?.directStreamReferer || ''
+  );
+  const [useProxyForNative, setUseProxyForNative] = useState<boolean>(() =>
+    Boolean(initialCachedSources?.directStreamReferer)
+  );
   const [liveSources, setLiveSources] = useState<LiveServerSourcesResponse | null>(
     initialCachedSources
   );
 
-  // Native HTML5 / HLS media controls state
+  // Native HTML5 / HLS / VLC media controls state
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
@@ -124,6 +153,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [captionsEnabled, setCaptionsEnabled] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [showEpisodeDrawer, setShowEpisodeDrawer] = useState(false);
+  const [activeMenu, setActiveMenu] = useState<'settings' | 'captions' | null>(null);
+
+  // HLS Quality / Audio / Subtitle track lists
+  const [qualityLevels, setQualityLevels] = useState<HlsQualityOption[]>([]);
+  const [selectedQualityIndex, setSelectedQualityIndex] = useState<number>(-1);
+  const [audioTracks, setAudioTracks] = useState<TrackOption[]>([]);
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>(0);
+  const [subtitleTracks, setSubtitleTracks] = useState<TrackOption[]>([]);
+  const [selectedSubtitleTrack, setSelectedSubtitleTrack] = useState<number>(-1);
 
   const [providerCfg] = useState(() => getVideoProviderConfig());
   const [startAtSeconds, setStartAtSeconds] = useState<number>(() => {
@@ -132,10 +170,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return Math.max(localResume, vidLinkResume);
   });
 
-  const controlsTimeoutRef = useRef<number | null>(null);
-  const lastSavedProgressSecRef = useRef<number>(0);
-
   const activeServer: AnyServerId = serverQueue[queueIndex] || 'vidlink';
+
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
 
   // Sync saved resume position when changing movie or episode
   useEffect(() => {
@@ -143,9 +186,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     const vidLinkResume = getVidLinkResumeSeconds(media, currentSeason, currentEpisode);
     setStartAtSeconds(Math.max(localResume, vidLinkResume));
     lastSavedProgressSecRef.current = 0;
+    resumeAppliedRef.current = false;
   }, [media, currentSeason, currentEpisode]);
 
-  // Automatic backend probe: find the verified working server before mounting the player
+  // Automatic backend probe: prioritize saved/CDN/Jellyfin direct media first, fallback cleanly to verified embed servers
   useEffect(() => {
     if (isOffline && hasPlayableDownloadedFile) {
       setPlayerMode('offline');
@@ -153,22 +197,44 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       return;
     }
 
-    const cached = getCachedLiveServerSources(media, currentSeason, currentEpisode);
-    if (cached) {
-      setLiveSources(cached);
-      if (cached.directStreamUrl && isDirectStreamUrl(cached.directStreamUrl)) {
-        setDirectStreamUrl(cached.directStreamUrl);
+    const applyResolvedSources = (res: LiveServerSourcesResponse) => {
+      setLiveSources(res);
+      const resolvedSub = res.directStreamSubtitleUrl || providerCfg.subFile || '';
+      const resolvedSubLabel = res.directStreamSubtitleLabel || providerCfg.subLabel || 'English';
+      const resolvedRef = res.directStreamReferer || '';
+
+      setDirectSubtitleUrl(resolvedSub);
+      setDirectSubtitleLabel(resolvedSubLabel);
+      setDirectReferer(resolvedRef);
+
+      const candidateDirect =
+        (res.directStreamUrl && isDirectStreamUrl(res.directStreamUrl) ? res.directStreamUrl : '') ||
+        (isDirectStreamUrl(media.videoPreviewUrl) ? media.videoPreviewUrl || '' : '');
+
+      if (candidateDirect) {
+        setDirectStreamUrl(candidateDirect);
+        setUseProxyForNative(Boolean(resolvedRef));
         setPlayerMode('native');
         setIsResolvingServer(false);
         return;
       }
-      const verified = cached.availableServers?.filter((srv) => srv !== 'primesrc');
-      setServerQueue(verified && verified.length > 0 ? verified : DEFAULT_FALLBACK_QUEUE);
+
+      const verified =
+        res.availableServers && res.availableServers.length > 0
+          ? res.availableServers.filter((srv) => srv !== 'primesrc')
+          : DEFAULT_FALLBACK_QUEUE;
+
+      setServerQueue(verified.length > 0 ? verified : DEFAULT_FALLBACK_QUEUE);
       setQueueIndex(0);
       setPlayerMode('stream');
       setIsResolvingServer(false);
       setIframeLoaded(false);
       setIframeKey((k) => k + 1);
+    };
+
+    const cached = getCachedLiveServerSources(media, currentSeason, currentEpisode);
+    if (cached) {
+      applyResolvedSources(cached);
       return;
     }
 
@@ -195,33 +261,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     resolveWithTimeout.then((res) => {
       if (cancelled) return;
-      setLiveSources(res);
-
-      if (res.directStreamUrl && isDirectStreamUrl(res.directStreamUrl)) {
-        setDirectStreamUrl(res.directStreamUrl);
-        setPlayerMode('native');
-        setIsResolvingServer(false);
-        return;
-      }
-
-      const verified =
-        res.availableServers && res.availableServers.length > 0
-          ? res.availableServers.filter((srv) => srv !== 'primesrc')
-          : DEFAULT_FALLBACK_QUEUE;
-
-      setServerQueue(verified.length > 0 ? verified : DEFAULT_FALLBACK_QUEUE);
-      setQueueIndex(0);
-      setPlayerMode('stream');
-      setIsResolvingServer(false);
-      setIframeKey((k) => k + 1);
+      applyResolvedSources(res);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile]);
+  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, providerCfg.subFile, providerCfg.subLabel]);
 
-  // Silent automatic failover across verified servers if a stream stalls without loading
+  // Silent automatic failover across verified servers if embed stream stalls
   useEffect(() => {
     if (isResolvingServer || playerMode !== 'stream' || iframeLoaded) return;
     if (queueIndex >= serverQueue.length - 1) return;
@@ -235,19 +283,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return () => window.clearTimeout(timeout);
   }, [isResolvingServer, playerMode, iframeLoaded, queueIndex, serverQueue.length, iframeKey]);
 
-  const allSeasons = ensureMediaSeasons(media);
+  const allSeasons = useMemo(() => ensureMediaSeasons(media), [media]);
   const activeSeason = allSeasons.find((s) => s.seasonNumber === currentSeason) || allSeasons[0];
   const resolvedMalId = liveSources?.resolvedMalId || media.malId;
 
-  const resolvedMedia: MediaItem =
-    liveSources?.resolvedTmdbId || liveSources?.resolvedImdbId || resolvedMalId
-      ? {
-          ...media,
-          tmdbId: liveSources?.resolvedTmdbId || media.tmdbId,
-          imdbId: liveSources?.resolvedImdbId || media.imdbId,
-          malId: resolvedMalId,
-        }
-      : media;
+  const resolvedMedia: MediaItem = useMemo(
+    () =>
+      liveSources?.resolvedTmdbId || liveSources?.resolvedImdbId || resolvedMalId
+        ? {
+            ...media,
+            tmdbId: liveSources?.resolvedTmdbId || media.tmdbId,
+            imdbId: liveSources?.resolvedImdbId || media.imdbId,
+            malId: resolvedMalId,
+          }
+        : media,
+    [media, liveSources, resolvedMalId]
+  );
 
   const activeStreamSource = generateStreamSource(
     resolvedMedia,
@@ -277,48 +328,51 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   );
 
   useEffect(() => {
-    if (!isResolvingServer && activeStreamSource?.url) {
+    if (!isResolvingServer && playerMode === 'stream' && activeStreamSource?.url) {
       prewarmStreamUrl(activeStreamSource.url);
     }
-  }, [isResolvingServer, activeStreamSource?.url]);
+  }, [isResolvingServer, playerMode, activeStreamSource?.url]);
 
-  const handleNavigateEpisode = (offset: number) => {
-    if (media.type !== 'series') return;
-    const currentSeasonData = allSeasons.find((s) => s.seasonNumber === currentSeason);
-    const epsCount = currentSeasonData?.episodes.length || 10;
+  const handleNavigateEpisode = useCallback(
+    (offset: number) => {
+      if (media.type !== 'series') return;
+      const currentSeasonData = allSeasons.find((s) => s.seasonNumber === currentSeason);
+      const epsCount = currentSeasonData?.episodes.length || 10;
 
-    let targetEp = currentEpisode + offset;
-    let targetSeason = currentSeason;
+      let targetEp = currentEpisode + offset;
+      let targetSeason = currentSeason;
 
-    if (targetEp > epsCount) {
-      if (currentSeason < allSeasons.length) {
-        targetSeason = currentSeason + 1;
-        targetEp = 1;
-      } else {
-        return;
+      if (targetEp > epsCount) {
+        if (currentSeason < allSeasons.length) {
+          targetSeason = currentSeason + 1;
+          targetEp = 1;
+        } else {
+          return;
+        }
+      } else if (targetEp < 1) {
+        if (currentSeason > 1) {
+          targetSeason = currentSeason - 1;
+          const prevSeasonData = allSeasons.find((s) => s.seasonNumber === targetSeason);
+          targetEp = prevSeasonData?.episodes.length || 10;
+        } else {
+          return;
+        }
       }
-    } else if (targetEp < 1) {
-      if (currentSeason > 1) {
-        targetSeason = currentSeason - 1;
-        const prevSeasonData = allSeasons.find((s) => s.seasonNumber === targetSeason);
-        targetEp = prevSeasonData?.episodes.length || 10;
-      } else {
-        return;
-      }
-    }
 
-    setCurrentSeason(targetSeason);
-    setCurrentEpisode(targetEp);
-    setDrawerSeason(targetSeason);
-    onSelectEpisode?.(targetSeason, targetEp);
-  };
+      setCurrentSeason(targetSeason);
+      setCurrentEpisode(targetEp);
+      setDrawerSeason(targetSeason);
+      onSelectEpisode?.(targetSeason, targetEp);
+    },
+    [media.type, allSeasons, currentSeason, currentEpisode, onSelectEpisode]
+  );
 
   const hasNextEpisode =
     media.type === 'series' &&
     (currentSeason < allSeasons.length ||
       currentEpisode < (activeSeason?.episodes.length || 10));
 
-  // Silent playback & progress tracking via postMessage (never displays errors)
+  // Silent playback & progress tracking via postMessage in stream mode
   useEffect(() => {
     const handlePlayerMessage = (event: MessageEvent) => {
       const origin = event.origin || '';
@@ -336,7 +390,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         | null;
       if (!rawData || typeof rawData !== 'object') return;
 
-      // Silent failover if upstream reports playback error
       if (
         (rawData.type === 'ERROR' || (rawData as { event?: string }).event === 'error') &&
         queueIndex < serverQueue.length - 1
@@ -444,81 +497,170 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     updateWatchProgress,
     queueIndex,
     serverQueue.length,
+    handleNavigateEpisode,
   ]);
 
-  const togglePlay = () => {
-    if (!videoRef.current) return;
-    if (videoRef.current.paused) {
-      videoRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+  const togglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    setActiveMenu(null);
+    if (video.paused) {
+      video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     } else {
-      videoRef.current.pause();
+      video.pause();
       setIsPlaying(false);
     }
-  };
+  }, []);
 
-  const skipTime = (seconds: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = Math.min(
-      videoRef.current.duration || 0,
-      Math.max(0, videoRef.current.currentTime + seconds)
-    );
-  };
+  const skipTime = useCallback((seconds: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const next = Math.min(video.duration || 0, Math.max(0, video.currentTime + seconds));
+    video.currentTime = next;
+    setCurrentTime(next);
+  }, []);
 
-  const toggleMute = () => {
-    if (!videoRef.current) return;
+  const toggleMute = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
-    videoRef.current.muted = nextMuted;
-  };
+    video.muted = nextMuted;
+  }, [isMuted]);
 
-  const toggleCaptions = () => {
-    if (!videoRef.current) return;
-    const next = !captionsEnabled;
-    setCaptionsEnabled(next);
-    const tracks = videoRef.current.textTracks;
-    for (let i = 0; i < tracks.length; i++) {
-      tracks[i].mode = next && i === 0 ? 'showing' : 'hidden';
+  const adjustVolume = useCallback((delta: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const nextVol = Math.min(1, Math.max(0, Number((volume + delta).toFixed(2))));
+    setVolume(nextVol);
+    setIsMuted(nextVol === 0);
+    video.volume = nextVol;
+    video.muted = nextVol === 0;
+  }, [volume]);
+
+  const applySubtitleTrack = useCallback((trackIdx: number) => {
+    const hls = hlsRef.current;
+    const video = videoRef.current;
+    setSelectedSubtitleTrack(trackIdx);
+    const enabled = trackIdx >= 0;
+    setCaptionsEnabled(enabled);
+
+    if (hls && hls.subtitleTracks.length > 0 && trackIdx < hls.subtitleTracks.length) {
+      hls.subtitleTrack = trackIdx;
     }
-  };
 
-  const toggleFullscreen = () => {
+    if (video) {
+      const tracks = video.textTracks;
+      for (let i = 0; i < tracks.length; i++) {
+        tracks[i].mode = enabled && i === trackIdx ? 'showing' : 'hidden';
+      }
+    }
+  }, []);
+
+  const toggleCaptions = useCallback(() => {
+    const nextEnabled = !captionsEnabled;
+    if (!nextEnabled) {
+      applySubtitleTrack(-1);
+      return;
+    }
+    if (subtitleTracks.length > 0 || (videoRef.current && videoRef.current.textTracks.length > 0)) {
+      applySubtitleTrack(0);
+    } else {
+      setCaptionsEnabled(false);
+    }
+  }, [captionsEnabled, subtitleTracks.length, applySubtitleTrack]);
+
+  const toggleFullscreen = useCallback(() => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
       containerRef.current.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
     } else {
       document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
     }
+  }, []);
+
+  const handleVideoClick = () => {
+    if (clickTimerRef.current) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+      return;
+    }
+    clickTimerRef.current = window.setTimeout(() => {
+      clickTimerRef.current = null;
+      togglePlay();
+    }, 180);
   };
 
+  const handleVideoDoubleClick = () => {
+    if (clickTimerRef.current) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+    toggleFullscreen();
+  };
+
+  // Full keyboard navigation (VLC / Netflix hotkeys)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const targetTag = (e.target as HTMLElement)?.tagName;
+      if (targetTag === 'INPUT' || targetTag === 'TEXTAREA') return;
+
       if (e.key === 'Escape') {
-        if (!document.fullscreenElement) onClose();
-      } else if (playerMode === 'offline' || playerMode === 'native') {
-        if (e.key === ' ' || e.key === 'k') {
-          e.preventDefault();
-          togglePlay();
-        } else if (e.key === 'ArrowLeft') {
-          e.preventDefault();
-          skipTime(-10);
-        } else if (e.key === 'ArrowRight') {
-          e.preventDefault();
-          skipTime(10);
-        } else if (e.key === 'm' || e.key === 'M') {
-          e.preventDefault();
-          toggleMute();
-        } else if (e.key === 'f' || e.key === 'F') {
-          e.preventDefault();
-          toggleFullscreen();
+        if (activeMenu) {
+          setActiveMenu(null);
+          return;
         }
+        if (showEpisodeDrawer) {
+          setShowEpisodeDrawer(false);
+          return;
+        }
+        if (!document.fullscreenElement) onClose();
+        return;
+      }
+
+      if (playerMode !== 'offline' && playerMode !== 'native') return;
+
+      if (e.key === ' ' || e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === 'ArrowLeft' || e.key === 'j' || e.key === 'J') {
+        e.preventDefault();
+        skipTime(-10);
+      } else if (e.key === 'ArrowRight' || e.key === 'l' || e.key === 'L') {
+        e.preventDefault();
+        skipTime(10);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        adjustVolume(0.1);
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        adjustVolume(-0.1);
+      } else if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        toggleMute();
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        toggleCaptions();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [playerMode, isPlaying, isMuted, isFullscreen]);
+  }, [
+    playerMode,
+    activeMenu,
+    showEpisodeDrawer,
+    onClose,
+    togglePlay,
+    skipTime,
+    adjustVolume,
+    toggleMute,
+    toggleFullscreen,
+    toggleCaptions,
+  ]);
 
   const handleMouseMove = () => {
     setShowControls(true);
@@ -526,29 +668,54 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       window.clearTimeout(controlsTimeoutRef.current);
     }
     controlsTimeoutRef.current = window.setTimeout(() => {
-      if (isPlaying || playerMode === 'stream') {
+      if ((isPlaying || playerMode === 'stream') && !activeMenu && !showEpisodeDrawer) {
         setShowControls(false);
       }
-    }, 3000);
+    }, 2500);
   };
 
-  // Inbuilt Native HTML5 / HLS video engine with instant automatic playback & silent fallback
+  // Effective native playback URL (direct CDN first, seamless /api/stream-proxy fallback on CORS/network failure)
+  const rawNativeSource =
+    playerMode === 'offline'
+      ? downloadedItem?.videoUrl || ''
+      : directStreamUrl.trim() || media.videoPreviewUrl || '';
+
+  const effectiveNativeSource =
+    playerMode === 'native' && useProxyForNative && rawNativeSource.startsWith('http')
+      ? buildProxiedMediaUrl(rawNativeSource, directReferer || undefined)
+      : rawNativeSource;
+
+  const proxiedSubtitleUrl = useMemo(() => {
+    if (!directSubtitleUrl) return '';
+    return buildProxiedMediaUrl(directSubtitleUrl, directReferer || undefined);
+  }, [directSubtitleUrl, directReferer]);
+
+  const handleNativeSourceError = useCallback(() => {
+    if (playerMode !== 'native') return;
+    if (!useProxyForNative && rawNativeSource.startsWith('http')) {
+      setUseProxyForNative(true);
+      setIsLoading(true);
+      return;
+    }
+    setPlayerMode('stream');
+  }, [playerMode, useProxyForNative, rawNativeSource]);
+
+  // Native HTML5 / HLS video engine with multi-quality, audio & subtitle track extraction
   useEffect(() => {
     if (playerMode !== 'native' && playerMode !== 'offline') return;
     const video = videoRef.current;
     if (!video) return;
 
-    const source =
-      playerMode === 'offline'
-        ? downloadedItem?.videoUrl || ''
-        : directStreamUrl.trim() || media.videoPreviewUrl || '';
-
-    if (!isDirectStreamUrl(source)) {
+    if (!isDirectStreamUrl(rawNativeSource)) {
       setPlayerMode('stream');
       return;
     }
 
     setIsLoading(true);
+    setQualityLevels([]);
+    setSelectedQualityIndex(-1);
+    setAudioTracks([]);
+    setSubtitleTracks([]);
 
     const attemptAutoPlay = () => {
       video
@@ -573,52 +740,100 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         });
     };
 
-    if (source.includes('.m3u8') && Hls.isSupported()) {
+    const looksLikeHls =
+      /\.m3u8(\?|$)/i.test(rawNativeSource) ||
+      effectiveNativeSource.includes('/api/jellyfin-stream/');
+
+    if (looksLikeHls && Hls.isSupported()) {
       if (hlsRef.current) hlsRef.current.destroy();
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
         backBufferLength: 90,
       });
-      hls.loadSource(source);
+
+      hls.loadSource(effectiveNativeSource);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, attemptAutoPlay);
-      hls.on(Hls.Events.ERROR, (_ev, data) => {
-        if (data.fatal && playerMode === 'native') {
-          hls.destroy();
-          setPlayerMode('stream');
-        }
+
+      hls.on(Hls.Events.MANIFEST_PARSED, (_ev, data) => {
+        const levels: HlsQualityOption[] = data.levels
+          .map((lvl, index) => ({
+            index,
+            label: lvl.height ? `${lvl.height}p` : `${Math.round(lvl.bitrate / 1000)} kbps`,
+          }))
+          .reverse();
+        setQualityLevels(levels);
+        attemptAutoPlay();
       });
+
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_ev, data) => {
+        setAudioTracks(
+          data.audioTracks.map((tr, idx) => ({
+            id: idx,
+            label: tr.name || tr.lang?.toUpperCase() || `Audio ${idx + 1}`,
+          }))
+        );
+        if (hls.audioTrack >= 0) setSelectedAudioTrack(hls.audioTrack);
+      });
+
+      hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_ev, data) => {
+        setSubtitleTracks(
+          data.subtitleTracks.map((tr, idx) => ({
+            id: idx,
+            label: tr.name || tr.lang?.toUpperCase() || `Track ${idx + 1}`,
+          }))
+        );
+      });
+
+      hls.on(Hls.Events.ERROR, (_ev, data) => {
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+          return;
+        }
+        hls.destroy();
+        handleNativeSourceError();
+      });
+
       hlsRef.current = hls;
 
       return () => {
         hls.destroy();
         hlsRef.current = null;
       };
-    } else {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-      video.src = source;
-      attemptAutoPlay();
     }
-  }, [playerMode, directStreamUrl, downloadedItem, media]);
+
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+    video.src = effectiveNativeSource;
+    attemptAutoPlay();
+
+    return () => {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    };
+  }, [playerMode, rawNativeSource, effectiveNativeSource, handleNativeSourceError]);
 
   const handleTimeUpdate = () => {
-    if (!videoRef.current) return;
-    const cur = videoRef.current.currentTime;
-    const dur = videoRef.current.duration || 1;
+    const video = videoRef.current;
+    if (!video) return;
+    const cur = video.currentTime;
+    const dur = video.duration || 1;
     setCurrentTime(cur);
     setDuration(dur);
     setIsLoading(false);
 
-    if (videoRef.current.buffered && videoRef.current.buffered.length > 0) {
-      setBufferedTime(videoRef.current.buffered.end(videoRef.current.buffered.length - 1));
+    if (video.buffered && video.buffered.length > 0) {
+      setBufferedTime(video.buffered.end(video.buffered.length - 1));
     }
 
-    const progressPct = Math.round((cur / dur) * 100);
-    if (Math.floor(cur) % 5 === 0) {
+    if (cur > 5 && Math.abs(cur - lastSavedProgressSecRef.current) >= 5) {
+      lastSavedProgressSecRef.current = cur;
+      const progressPct = Math.min(99, Math.round((cur / dur) * 100));
+      saveResumeSeconds(media.id, cur, currentSeason, currentEpisode);
       updateWatchProgress(media.id, progressPct, currentSeason, currentEpisode);
     }
   };
@@ -642,7 +857,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   };
 
   const formatTime = (secs: number) => {
-    if (isNaN(secs)) return '00:00';
+    if (!Number.isFinite(secs) || isNaN(secs)) return '00:00';
     const h = Math.floor(secs / 3600);
     const m = Math.floor((secs % 3600) / 60);
     const s = Math.floor(secs % 60);
@@ -656,20 +871,32 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     (playerMode === 'stream' && (isResolvingServer || !iframeLoaded)) ||
     ((playerMode === 'native' || playerMode === 'offline') && isLoading);
 
+  const hideCursor =
+    (playerMode === 'native' || playerMode === 'offline') &&
+    isPlaying &&
+    !showControls &&
+    !activeMenu &&
+    !showEpisodeDrawer;
+
   return (
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="fixed inset-0 z-50 bg-black flex items-center justify-center select-none overflow-hidden"
+      onMouseLeave={() => {
+        if (isPlaying && !activeMenu) setShowControls(false);
+      }}
+      className={`fixed inset-0 z-50 bg-black flex items-center justify-center select-none overflow-hidden ${
+        hideCursor ? 'cursor-none' : ''
+      }`}
     >
-      {/* Pure Pitch-Black Stage with Loading Spinner Only (no text, no error states, no server labels) */}
+      {/* Pure Pitch-Black Loading Stage (zero labels, spinner only) */}
       {showDarkLoadingStage && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black pointer-events-none">
           <Loader2 className="w-10 h-10 text-white/85 animate-spin" />
         </div>
       )}
 
-      {/* 1. AUTOMATIC STREAM PLAYER */}
+      {/* 1. EMBED FALLBACK PLAYER (for titles without a direct CDN/HLS link) */}
       {playerMode === 'stream' && !isResolvingServer && (
         <div className="w-full h-full relative bg-black overflow-hidden">
           <iframe
@@ -698,13 +925,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         </div>
       )}
 
-      {/* 2. INBUILT NATIVE HTML5 & HLS PLAYER (Minimal Monochrome Media Features Only) */}
+      {/* 2. NETFLIX / VLC NATIVE HTML5 & HLS MEDIA PLAYER */}
       {(playerMode === 'offline' || playerMode === 'native') && (
         <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
           <video
             ref={videoRef}
             playsInline
             autoPlay
+            crossOrigin={proxiedSubtitleUrl ? 'anonymous' : undefined}
             onTimeUpdate={handleTimeUpdate}
             onWaiting={() => setIsLoading(true)}
             onPlaying={() => {
@@ -713,21 +941,43 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             }}
             onLoadedData={() => setIsLoading(false)}
             onLoadedMetadata={() => {
-              if (videoRef.current) {
-                setDuration(videoRef.current.duration);
-                videoRef.current.playbackRate = playbackSpeed;
+              const video = videoRef.current;
+              if (video) {
+                const dur = video.duration || 0;
+                setDuration(dur);
+                video.playbackRate = playbackSpeed;
+                video.volume = volume;
+                video.muted = isMuted;
+                if (!resumeAppliedRef.current && startAtSeconds > 5 && (!dur || startAtSeconds < dur - 10)) {
+                  video.currentTime = startAtSeconds;
+                  setCurrentTime(startAtSeconds);
+                }
+                resumeAppliedRef.current = true;
               }
               setIsLoading(false);
             }}
-            onError={() => {
-              if (playerMode === 'native') {
-                setPlayerMode('stream');
+            onError={handleNativeSourceError}
+            onEnded={() => {
+              setIsPlaying(false);
+              saveResumeSeconds(media.id, 0, currentSeason, currentEpisode);
+              updateWatchProgress(media.id, 100, currentSeason, currentEpisode);
+              if (media.type === 'series' && hasNextEpisode) {
+                handleNavigateEpisode(1);
               }
             }}
-            onEnded={() => setIsPlaying(false)}
-            onClick={togglePlay}
-            className="w-full h-full object-contain cursor-pointer"
-          />
+            onClick={handleVideoClick}
+            onDoubleClick={handleVideoDoubleClick}
+            className={`w-full h-full object-contain ${hideCursor ? 'cursor-none' : 'cursor-pointer'}`}
+          >
+            {proxiedSubtitleUrl && (
+              <track
+                kind="subtitles"
+                src={proxiedSubtitleUrl}
+                label={directSubtitleLabel || 'Subtitles'}
+                srcLang="en"
+              />
+            )}
+          </video>
 
           {!isPlaying && !isLoading && (
             <button
@@ -735,16 +985,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               aria-label="Play"
               className="absolute flex items-center justify-center text-white/90 hover:text-white hover:scale-110 transition-transform cursor-pointer drop-shadow-2xl"
             >
-              <Play className="w-14 h-14 sm:w-16 sm:h-16 fill-current ml-1" />
+              <Play className="w-16 h-16 sm:w-20 sm:h-20 fill-current ml-1" />
             </button>
           )}
 
-          {/* Monochrome Media Controls Bar */}
+          {/* VLC / Monochrome Bottom Controls Bar (zero labels during playback) */}
           <div
-            className={`absolute bottom-0 left-0 right-0 px-4 sm:px-5 pb-3 pt-10 bg-gradient-to-t from-black/95 via-black/45 to-transparent transition-opacity duration-200 ${
-              showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            onClick={(e) => e.stopPropagation()}
+            className={`absolute bottom-0 left-0 right-0 px-4 sm:px-6 pb-4 pt-12 bg-gradient-to-t from-black/95 via-black/50 to-transparent transition-opacity duration-200 ${
+              showControls || !isPlaying || activeMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'
             }`}
           >
+            {/* Seek Scrubber */}
             <div className="group relative mb-3 h-3 flex items-center">
               <div className="w-full h-[3px] group-hover:h-[5px] bg-white/25 rounded-full overflow-hidden relative transition-all">
                 <div
@@ -753,7 +1005,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 />
                 <div
                   className="absolute left-0 top-0 bottom-0 bg-white transition-all"
-                  style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                  style={{ width: `${Math.min(100, (currentTime / (duration || 1)) * 100)}%` }}
                 />
               </div>
               <input
@@ -763,11 +1015,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 step={0.1}
                 value={currentTime}
                 onChange={handleSeek}
+                aria-label="Seek timeline"
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4 text-white">
+            <div className="relative flex items-center justify-between gap-4 text-white">
               <div className="flex items-center gap-3.5 sm:gap-4">
                 <button
                   onClick={togglePlay}
@@ -816,7 +1069,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     step={0.05}
                     value={isMuted ? 0 : volume}
                     onChange={handleVolumeChange}
-                    className="w-0 group-hover/vol:w-16 opacity-0 group-hover/vol:opacity-100 h-1 bg-white/30 rounded-full appearance-none accent-white cursor-pointer transition-all duration-200"
+                    aria-label="Volume"
+                    className="w-0 group-hover/vol:w-20 opacity-0 group-hover/vol:opacity-100 h-1 bg-white/30 rounded-full appearance-none accent-white cursor-pointer transition-all duration-200"
                   />
                 </div>
 
@@ -826,33 +1080,186 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
 
               <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const speeds = [1, 1.25, 1.5, 2, 0.75];
-                    const next = speeds[(speeds.indexOf(playbackSpeed) + 1) % speeds.length];
-                    setPlaybackSpeed(next);
-                    if (videoRef.current) videoRef.current.playbackRate = next;
-                  }}
-                  className="p-1 text-white/85 hover:text-white transition-colors cursor-pointer flex items-center gap-1"
-                  aria-label="Playback speed"
-                >
-                  <Settings className="w-5 h-5" />
-                  {playbackSpeed !== 1 && (
-                    <span className="text-[11px] font-mono">{playbackSpeed}x</span>
-                  )}
-                </button>
+                {/* Quality / Speed / Audio Popover */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setActiveMenu((prev) => (prev === 'settings' ? null : 'settings'))}
+                    className={`p-1 transition-colors cursor-pointer flex items-center gap-1 ${
+                      activeMenu === 'settings' ? 'text-white' : 'text-white/80 hover:text-white'
+                    }`}
+                    aria-label="Playback settings"
+                  >
+                    <Settings className="w-5 h-5" />
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={toggleCaptions}
-                  className={`p-1 transition-colors cursor-pointer ${
-                    captionsEnabled ? 'text-white' : 'text-white/65 hover:text-white'
-                  }`}
-                  aria-label="Captions"
-                >
-                  <Captions className="w-5 h-5" />
-                </button>
+                  {activeMenu === 'settings' && (
+                    <div className="absolute bottom-10 right-0 w-56 rounded-2xl bg-[#0D1017]/95 border border-white/15 backdrop-blur-xl shadow-2xl p-3 text-xs space-y-3 z-50">
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                          Speed
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {PLAYBACK_SPEEDS.map((spd) => (
+                            <button
+                              key={spd}
+                              type="button"
+                              onClick={() => {
+                                setPlaybackSpeed(spd);
+                                if (videoRef.current) videoRef.current.playbackRate = spd;
+                              }}
+                              className={`px-2 py-1 rounded-lg font-mono text-[11px] cursor-pointer transition-colors ${
+                                playbackSpeed === spd
+                                  ? 'bg-white text-black font-bold'
+                                  : 'bg-white/5 text-slate-300 hover:bg-white/15'
+                              }`}
+                            >
+                              {spd}x
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {qualityLevels.length > 0 && (
+                        <div className="pt-2 border-t border-white/10">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                            Quality
+                          </div>
+                          <div className="space-y-0.5 max-h-32 overflow-y-auto no-scrollbar">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedQualityIndex(-1);
+                                if (hlsRef.current) hlsRef.current.currentLevel = -1;
+                              }}
+                              className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg cursor-pointer ${
+                                selectedQualityIndex === -1
+                                  ? 'bg-white/15 text-white font-semibold'
+                                  : 'text-slate-300 hover:bg-white/10'
+                              }`}
+                            >
+                              <span>Auto</span>
+                              {selectedQualityIndex === -1 && <Check className="w-3.5 h-3.5" />}
+                            </button>
+                            {qualityLevels.map((lvl) => (
+                              <button
+                                key={lvl.index}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedQualityIndex(lvl.index);
+                                  if (hlsRef.current) hlsRef.current.currentLevel = lvl.index;
+                                }}
+                                className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg cursor-pointer ${
+                                  selectedQualityIndex === lvl.index
+                                    ? 'bg-white/15 text-white font-semibold'
+                                    : 'text-slate-300 hover:bg-white/10'
+                                }`}
+                              >
+                                <span>{lvl.label}</span>
+                                {selectedQualityIndex === lvl.index && <Check className="w-3.5 h-3.5" />}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {audioTracks.length > 1 && (
+                        <div className="pt-2 border-t border-white/10">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                            Audio
+                          </div>
+                          <div className="space-y-0.5 max-h-28 overflow-y-auto no-scrollbar">
+                            {audioTracks.map((tr) => (
+                              <button
+                                key={tr.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedAudioTrack(tr.id);
+                                  if (hlsRef.current) hlsRef.current.audioTrack = tr.id;
+                                }}
+                                className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg cursor-pointer ${
+                                  selectedAudioTrack === tr.id
+                                    ? 'bg-white/15 text-white font-semibold'
+                                    : 'text-slate-300 hover:bg-white/10'
+                                }`}
+                              >
+                                <span className="truncate">{tr.label}</span>
+                                {selectedAudioTrack === tr.id && <Check className="w-3.5 h-3.5" />}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Captions / Subtitles Popover */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (subtitleTracks.length <= 1 && proxiedSubtitleUrl) {
+                        toggleCaptions();
+                      } else if (subtitleTracks.length > 0 || proxiedSubtitleUrl) {
+                        setActiveMenu((prev) => (prev === 'captions' ? null : 'captions'));
+                      } else {
+                        toggleCaptions();
+                      }
+                    }}
+                    className={`p-1 transition-colors cursor-pointer ${
+                      captionsEnabled ? 'text-white' : 'text-white/65 hover:text-white'
+                    }`}
+                    aria-label="Subtitles"
+                  >
+                    <Captions className="w-5 h-5" />
+                  </button>
+
+                  {activeMenu === 'captions' && (
+                    <div className="absolute bottom-10 right-0 w-48 rounded-2xl bg-[#0D1017]/95 border border-white/15 backdrop-blur-xl shadow-2xl p-2.5 text-xs space-y-1 z-50">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          applySubtitleTrack(-1);
+                          setActiveMenu(null);
+                        }}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg cursor-pointer ${
+                          !captionsEnabled
+                            ? 'bg-white/15 text-white font-semibold'
+                            : 'text-slate-300 hover:bg-white/10'
+                        }`}
+                      >
+                        <span>Off</span>
+                        {!captionsEnabled && <Check className="w-3.5 h-3.5" />}
+                      </button>
+                      {(subtitleTracks.length > 0
+                        ? subtitleTracks
+                        : proxiedSubtitleUrl
+                        ? [{ id: 0, label: directSubtitleLabel || 'English' }]
+                        : []
+                      ).map((sub) => (
+                        <button
+                          key={sub.id}
+                          type="button"
+                          onClick={() => {
+                            applySubtitleTrack(sub.id);
+                            setActiveMenu(null);
+                          }}
+                          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg cursor-pointer ${
+                            captionsEnabled && selectedSubtitleTrack === sub.id
+                              ? 'bg-white/15 text-white font-semibold'
+                              : 'text-slate-300 hover:bg-white/10'
+                          }`}
+                        >
+                          <span className="truncate">{sub.label}</span>
+                          {captionsEnabled && selectedSubtitleTrack === sub.id && (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 <button
                   onClick={toggleFullscreen}
@@ -871,10 +1278,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         </div>
       )}
 
-      {/* MINIMAL FLOATING MEDIA CONTROLS ONLY (No titles, no server labels, no text badges) */}
+      {/* MINIMAL FLOATING TOP NAVIGATION (No titles, no server badges, hides cleanly during playback) */}
       <div
         className={`absolute top-0 left-0 right-0 p-4 flex items-center justify-between z-40 pointer-events-none transition-opacity duration-300 ${
-          showDarkLoadingStage || showControls ? 'opacity-100' : 'opacity-0'
+          showDarkLoadingStage || showControls || !isPlaying ? 'opacity-100' : 'opacity-0'
         }`}
       >
         <button
@@ -885,7 +1292,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           <X className="w-5 h-5" />
         </button>
 
-        {/* Media Features Only: Series Episode Switcher & Offline Copy Toggle */}
         <div className="pointer-events-auto flex items-center gap-2">
           {media.type === 'series' && (
             <div className="flex items-center bg-black/60 p-1 rounded-full border border-white/10 backdrop-blur-md">
@@ -918,7 +1324,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
           {isDownloaded && hasPlayableDownloadedFile && (
             <button
-              onClick={() => setPlayerMode(playerMode === 'offline' ? 'stream' : 'offline')}
+              onClick={() => setPlayerMode(playerMode === 'offline' ? (directStreamUrl ? 'native' : 'stream') : 'offline')}
               className={`p-2.5 rounded-full border backdrop-blur-md transition-colors cursor-pointer ${
                 playerMode === 'offline'
                   ? 'bg-white text-black border-white'

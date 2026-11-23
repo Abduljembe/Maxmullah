@@ -81,6 +81,29 @@ function mapClientCinemetaToRaw(meta: ClientCinemetaItem, isTv: boolean): RawTMD
   };
 }
 
+const CINEMETA_GENRE_MAP: Record<number, string> = {
+  28: 'Action',
+  12: 'Adventure',
+  16: 'Animation',
+  35: 'Comedy',
+  80: 'Crime',
+  99: 'Documentary',
+  18: 'Drama',
+  10751: 'Family',
+  14: 'Fantasy',
+  36: 'History',
+  27: 'Horror',
+  10402: 'Music',
+  9648: 'Mystery',
+  10749: 'Romance',
+  878: 'Sci-Fi',
+  53: 'Thriller',
+  10752: 'War',
+  37: 'Western',
+  10759: 'Action',
+  10765: 'Sci-Fi',
+};
+
 async function fetchClientCinemetaFallback(
   tmdbPath: string,
   paramsObj: Record<string, string | number | boolean>
@@ -89,31 +112,63 @@ async function fetchClientCinemetaFallback(
   const cmType = isTv ? 'series' : 'movie';
   const query = typeof paramsObj.query === 'string' ? paramsObj.query.trim() : '';
   const page = Math.max(1, Number(paramsObj.page) || 1);
-  const skip = (page - 1) * 20;
+  const firstGenreId = parseInt(String(paramsObj.with_genres || '').split(',')[0] || '0', 10);
+  const genreName = CINEMETA_GENRE_MAP[firstGenreId];
+  const sortBy = String(paramsObj.sort_by || '');
+
+  const startOffset = (page - 1) * 20;
+  const skip = Math.floor(startOffset / 50) * 50;
+  const sliceStart = startOffset % 50;
 
   try {
     let url = '';
     if (query) {
       url = `https://v3-cinemeta.strem.io/catalog/${cmType}/top/search=${encodeURIComponent(query)}.json`;
-    } else if (tmdbPath.includes('top_rated')) {
-      url = skip > 0
-        ? `https://v3-cinemeta.strem.io/catalog/${cmType}/imdbRating/skip=${skip}.json`
-        : `https://v3-cinemeta.strem.io/catalog/${cmType}/imdbRating.json`;
+    } else if (genreName) {
+      url = `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top/genre=${encodeURIComponent(genreName)}.json`;
+    } else if (tmdbPath.includes('top_rated') || sortBy.includes('vote_average')) {
+      url =
+        skip > 0
+          ? `https://cinemeta-catalogs.strem.io/imdbRating/catalog/${cmType}/imdbRating/skip=${skip}.json`
+          : `https://cinemeta-catalogs.strem.io/imdbRating/catalog/${cmType}/imdbRating.json`;
+    } else if (
+      tmdbPath.includes('now_playing') ||
+      tmdbPath.includes('upcoming') ||
+      sortBy.includes('release_date')
+    ) {
+      url =
+        skip > 0
+          ? `https://cinemeta-catalogs.strem.io/year/catalog/${cmType}/year/skip=${skip}.json`
+          : `https://cinemeta-catalogs.strem.io/year/catalog/${cmType}/year.json`;
+    } else if (tmdbPath.includes('trending') && tmdbPath.includes('week')) {
+      const weekOffset = startOffset + 20;
+      const weekSkip = Math.floor(weekOffset / 50) * 50;
+      url =
+        weekSkip > 0
+          ? `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top/skip=${weekSkip}.json`
+          : `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top.json`;
     } else {
-      url = skip > 0
-        ? `https://v3-cinemeta.strem.io/catalog/${cmType}/top/skip=${skip}.json`
-        : `https://v3-cinemeta.strem.io/catalog/${cmType}/top.json`;
+      url =
+        skip > 0
+          ? `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top/skip=${skip}.json`
+          : `https://cinemeta-catalogs.strem.io/top/catalog/${cmType}/top.json`;
     }
 
     const res = await fetch(url);
     if (!isJsonResponse(res)) return null;
     const data = (await res.json()) as { metas?: ClientCinemetaItem[] };
-    const metas = Array.isArray(data?.metas) ? data.metas : [];
+    const allMetas = Array.isArray(data?.metas) ? data.metas : [];
+    const offset = query
+      ? 0
+      : tmdbPath.includes('trending') && tmdbPath.includes('week') && !genreName
+      ? (startOffset + 20) % 50
+      : sliceStart;
+    const metas = query ? allMetas : allMetas.slice(offset, offset + 20);
     const results = metas.map((m) => mapClientCinemetaToRaw(m, isTv));
     return {
       results,
-      total_pages: results.length >= 20 ? page + 10 : page,
-      total_results: Math.max(results.length, page * 20),
+      total_pages: genreName ? Math.max(1, Math.ceil(allMetas.length / 20)) : 20,
+      total_results: genreName ? allMetas.length : 400,
     };
   } catch {
     return null;
@@ -897,6 +952,8 @@ export async function fetchLiveTrendingPaged(
               Boolean(r.poster_path || r.backdrop_path)
             );
           }
+          if (type === 'movie' && r.media_type === 'tv') return false;
+          if (type === 'tv' && r.media_type === 'movie') return false;
           return Boolean(r.poster_path || r.backdrop_path);
         })
         .map((item) =>
@@ -914,19 +971,22 @@ export async function fetchLiveTrendingPaged(
     }
   } catch {}
 
-  try {
-    const tvmazePage = Math.max(0, Math.floor((page - 1) / 10));
-    const chunkOffset = ((page - 1) % 10) * 20;
-    const res = await fetch(`${TVMAZE_BASE_URL}/shows?page=${tvmazePage}`);
-    if (res.ok) {
-      const shows: TVMazeShow[] = await res.json();
-      const items = shows.slice(chunkOffset, chunkOffset + 20).map(normalizeTVMazeShow);
-      if (items.length > 0) {
-        return { items, page, totalPages: 50, totalResults: 1000 };
+  // Never put TVMaze TV shows into movie-only rows
+  if (type === 'tv') {
+    try {
+      const tvmazePage = Math.max(0, Math.floor((page - 1) / 10));
+      const chunkOffset = ((page - 1) % 10) * 20;
+      const res = await fetch(`${TVMAZE_BASE_URL}/shows?page=${tvmazePage}`);
+      if (res.ok) {
+        const shows: TVMazeShow[] = await res.json();
+        const items = shows.slice(chunkOffset, chunkOffset + 20).map(normalizeTVMazeShow);
+        if (items.length > 0) {
+          return { items, page, totalPages: 50, totalResults: 1000 };
+        }
       }
+    } catch (err) {
+      console.warn('TVMaze live catalog fetch fallback', err);
     }
-  } catch (err) {
-    console.warn('TVMaze live catalog fetch fallback', err);
   }
 
   return { items: [], page, totalPages: 1, totalResults: 0 };

@@ -782,8 +782,20 @@ export interface LivePrimeSrcHost {
   audio_language: string | null;
 }
 
+export interface SavedDirectStreamRecord {
+  url: string;
+  title?: string;
+  subtitleUrl?: string;
+  subtitleLabel?: string;
+  referer?: string;
+  updatedAt?: string;
+}
+
 export interface LiveServerSourcesResponse {
   directStreamUrl?: string;
+  directStreamSubtitleUrl?: string;
+  directStreamSubtitleLabel?: string;
+  directStreamReferer?: string;
   vidlinkAvailable: boolean;
   vidfastAvailable?: boolean;
   videasyAvailable?: boolean;
@@ -796,12 +808,69 @@ export interface LiveServerSourcesResponse {
   recommendedServer?: AnyServerId;
 }
 
+export function buildProxiedMediaUrl(rawUrl: string, referer?: string): string {
+  const clean = rawUrl.trim();
+  if (!clean) return '';
+  if (
+    clean.startsWith('blob:') ||
+    clean.startsWith('/api/stream-proxy') ||
+    clean.startsWith('/api/jellyfin-stream/')
+  ) {
+    return clean;
+  }
+  if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+    return clean;
+  }
+  const params = new URLSearchParams({ url: clean });
+  if (referer && (referer.startsWith('http://') || referer.startsWith('https://'))) {
+    params.set('ref', referer.trim());
+  }
+  return `/api/stream-proxy?${params.toString()}`;
+}
+
+export async function getSavedDirectStream(
+  media: MediaItem,
+  season = 1,
+  episode = 1
+): Promise<SavedDirectStreamRecord | null> {
+  const id = resolveTargetIdentifier(media);
+  const type = media.type === 'series' ? 'tv' : 'movie';
+  try {
+    const params = new URLSearchParams({
+      id,
+      type,
+      season: String(Math.max(1, season)),
+      episode: String(Math.max(1, episode)),
+    });
+    if (media.imdbId) params.set('imdbId', media.imdbId);
+    const res = await fetch(`/api/streams?${params.toString()}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { entry?: SavedDirectStreamRecord | null };
+    return data.entry || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getSavedDirectStreamsCount(): Promise<number> {
+  try {
+    const res = await fetch('/api/streams');
+    if (!res.ok) return 0;
+    const data = (await res.json()) as { count?: number; streams?: Record<string, unknown> };
+    if (typeof data.count === 'number') return data.count;
+    return data.streams ? Object.keys(data.streams).length : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function saveCustomDirectStream(
   media: MediaItem,
   url: string,
   season = 1,
-  episode = 1
-): Promise<boolean> {
+  episode = 1,
+  options?: { subtitleUrl?: string; subtitleLabel?: string; referer?: string }
+): Promise<{ ok: boolean; error?: string }> {
   const id = resolveTargetIdentifier(media);
   const type = media.type === 'series' ? 'tv' : 'movie';
   try {
@@ -815,11 +884,23 @@ export async function saveCustomDirectStream(
         episode,
         url: url.trim(),
         title: media.title,
+        subtitleUrl: options?.subtitleUrl?.trim() || undefined,
+        subtitleLabel: options?.subtitleLabel?.trim() || undefined,
+        referer: options?.referer?.trim() || undefined,
       }),
     });
-    return res.ok;
-  } catch {
-    return false;
+    invalidateLiveServerSourcesCache(media, season, episode);
+    if (!res.ok) {
+      let msg = `Failed to save direct stream (HTTP ${res.status}).`;
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body.error) msg = body.error;
+      } catch {}
+      return { ok: false, error: msg };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Network error' };
   }
 }
 
@@ -838,6 +919,7 @@ export async function removeCustomDirectStream(
       episode: String(Math.max(1, episode)),
     });
     const res = await fetch(`/api/streams?${params.toString()}`, { method: 'DELETE' });
+    invalidateLiveServerSourcesCache(media, season, episode);
     return res.ok;
   } catch {
     return false;
@@ -855,6 +937,15 @@ function makeClientSourcesCacheKey(media: MediaItem, season: number, episode: nu
   const targetId = resolveTargetIdentifier(media);
   const type = media.type === 'series' ? 'tv' : 'movie';
   return `${type}:${targetId}:s${Math.max(1, season)}e${Math.max(1, episode)}`;
+}
+
+export function invalidateLiveServerSourcesCache(
+  media: MediaItem,
+  season = 1,
+  episode = 1
+): void {
+  const key = makeClientSourcesCacheKey(media, season, episode);
+  clientSourcesCache.delete(key);
 }
 
 export function getCachedLiveServerSources(
@@ -915,6 +1006,9 @@ export async function fetchLiveServerSources(
         const data = (await res.json()) as Partial<LiveServerSourcesResponse>;
         const normalized: LiveServerSourcesResponse = {
           directStreamUrl: data.directStreamUrl,
+          directStreamSubtitleUrl: data.directStreamSubtitleUrl,
+          directStreamSubtitleLabel: data.directStreamSubtitleLabel,
+          directStreamReferer: data.directStreamReferer,
           vidlinkAvailable: Boolean(data.vidlinkAvailable),
           vidfastAvailable: Boolean(data.vidfastAvailable),
           videasyAvailable: Boolean(data.videasyAvailable),

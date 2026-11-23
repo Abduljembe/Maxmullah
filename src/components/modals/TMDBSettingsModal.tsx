@@ -21,6 +21,7 @@ import {
   VIDUKI_SERVERS,
   AnyServerId,
   VideoStreamProvider,
+  getSavedDirectStreamsCount,
 } from '../../services/videoProviderService';
 
 interface TMDBSettingsModalProps {
@@ -37,12 +38,14 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
   const [activeTab, setActiveTab] = useState<'videoProvider' | 'tmdb'>('videoProvider');
   const [providerCfg, setProviderCfg] = useState(getVideoProviderConfig());
   const [tmdbConfig, setTmdbConfig] = useState<TMDBConfiguration>(() => getTMDBConfiguration());
+  const [directStreamsCount, setDirectStreamsCount] = useState<number>(0);
   const [isRefreshingCfg, setIsRefreshingCfg] = useState(false);
   const [savedBanner, setSavedBanner] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     initTMDBConfiguration().then((cfg) => setTmdbConfig(cfg));
+    getSavedDirectStreamsCount().then((cnt) => setDirectStreamsCount(cnt));
   }, [isOpen]);
 
   if (!isOpen) return null;
@@ -274,6 +277,12 @@ export const TMDBSettingsModal: React.FC<TMDBSettingsModalProps> = ({
               <div className="flex items-center justify-between">
                 <span className="text-slate-400">Change Tracking Keys</span>
                 <span className="font-mono text-slate-200">{tmdbConfig.change_keys.length} registered</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Direct Native Streams</span>
+                <span className="font-mono text-emerald-300">
+                  {directStreamsCount} attached (.mp4 / .m3u8)
+                </span>
               </div>
             </div>
 

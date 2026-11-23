@@ -26,7 +26,9 @@ export function isDirectStreamUrl(url?: string): boolean {
   return (
     trimmed.startsWith('http://') ||
     trimmed.startsWith('https://') ||
-    trimmed.startsWith('blob:')
+    trimmed.startsWith('blob:') ||
+    trimmed.startsWith('/api/stream-proxy') ||
+    trimmed.startsWith('/api/jellyfin-stream/')
   );
 }
 
