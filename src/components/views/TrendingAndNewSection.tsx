@@ -8,6 +8,7 @@ import {
   fetchLiveTrendingPaged,
   fetchServerIndexedCatalog,
   fetchServerMovies,
+  fetchServerSeries,
 } from '../../services/tmdbService';
 import { MediaCard } from '../cards/MediaCard';
 
@@ -47,6 +48,7 @@ interface InfiniteCinemaRowProps {
   resetKey: string;
   fallbackItems: MediaItem[];
   eager?: boolean;
+  activationDelayMs?: number;
   onSelect: (media: MediaItem) => void;
   onPlay: (media: MediaItem) => void;
   onDownload: (media: MediaItem) => void;
@@ -61,6 +63,7 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
   resetKey,
   fallbackItems,
   eager = false,
+  activationDelayMs = 350,
   onSelect,
   onPlay,
   onDownload,
@@ -81,14 +84,21 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
   const pageRef = useRef(1);
   const totalPagesRef = useRef(500);
   const loadingRef = useRef(false);
+  const emptyStreakRef = useRef(0);
   const activeKeyRef = useRef(resetKey);
+  const onItemsLoadedRef = useRef(onItemsLoaded);
+  onItemsLoadedRef.current = onItemsLoaded;
 
   useEffect(() => {
     if (eager || hasActivated) return;
     const node = sectionRef.current;
-    if (!node || typeof IntersectionObserver === 'undefined') {
+
+    const timer = window.setTimeout(() => {
       setHasActivated(true);
-      return;
+    }, activationDelayMs);
+
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      return () => window.clearTimeout(timer);
     }
 
     const observer = new IntersectionObserver(
@@ -98,11 +108,14 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
           observer.disconnect();
         }
       },
-      { rootMargin: '800px 0px' }
+      { rootMargin: '1200px 0px' }
     );
     observer.observe(node);
-    return () => observer.disconnect();
-  }, [eager, hasActivated]);
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [eager, hasActivated, activationDelayMs]);
 
   useEffect(() => {
     if (!hasActivated) return;
@@ -111,6 +124,7 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
     pageRef.current = 1;
     totalPagesRef.current = 500;
     loadingRef.current = true;
+    emptyStreakRef.current = 0;
     setIsInitialLoading(true);
     setIsLoadingMore(false);
     setHasMore(true);
@@ -129,7 +143,7 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
         setHasMore(loadedPage < maxTotalPages);
 
         if (combined.length > 0) {
-          onItemsLoaded?.(combined);
+          onItemsLoadedRef.current?.(combined);
         }
       })
       .finally(() => {
@@ -161,11 +175,15 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
       if (activeKeyRef.current !== currentKey) return;
       pageRef.current = nextPage;
       totalPagesRef.current = Math.max(pageRef.current, res.totalPages || totalPagesRef.current);
-      setHasMore(pageRef.current < totalPagesRef.current);
 
       if (res.items.length > 0) {
+        emptyStreakRef.current = 0;
         setItems((prev) => deduplicateItems([...prev, ...res.items]));
-        onItemsLoaded?.(res.items);
+        onItemsLoadedRef.current?.(res.items);
+        setHasMore(pageRef.current < totalPagesRef.current);
+      } else {
+        emptyStreakRef.current += 1;
+        setHasMore(emptyStreakRef.current < 2 && pageRef.current < totalPagesRef.current);
       }
     } finally {
       if (activeKeyRef.current === currentKey) {
@@ -173,7 +191,7 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
         setIsLoadingMore(false);
       }
     }
-  }, [hasActivated, resetKey, fetchPage, onItemsLoaded]);
+  }, [hasActivated, resetKey, fetchPage]);
 
   useEffect(() => {
     const rail = railRef.current;
@@ -356,8 +374,11 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
   );
 
   const fetchTrendingSeries = useCallback(
-    (page: number) => fetchLiveTrendingPaged('tv', page, trendingWindow),
-    [trendingWindow]
+    (page: number) =>
+      watchProviderId
+        ? fetchServerSeries({ feed: 'popular', page, watchProviderId })
+        : fetchLiveTrendingPaged('tv', page, trendingWindow),
+    [watchProviderId, trendingWindow]
   );
 
   const fetchVixSrcMovies = useCallback(
@@ -554,7 +575,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
       <InfiniteCinemaRow
         title="Trending series"
         fetchPage={fetchTrendingSeries}
-        resetKey={`trending-series-${trendingWindow}`}
+        resetKey={`trending-series-${trendingWindow}-${selectedPlatform}`}
         fallbackItems={seriesFallbacks}
         eager
         onSelect={onSelect}
@@ -596,6 +617,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchPopularMovies}
         resetKey={`popular-released-movies-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={150}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -608,6 +630,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchTopRatedMovies}
         resetKey={`top-rated-movies-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={250}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -620,6 +643,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchActionMovies}
         resetKey={`genre-28-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={350}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -632,6 +656,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchSciFiMovies}
         resetKey={`genre-878-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={450}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -644,6 +669,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchComedyMovies}
         resetKey={`genre-35-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={550}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -656,6 +682,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchHorrorMovies}
         resetKey={`genre-27-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={650}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -668,6 +695,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchAnimationMovies}
         resetKey={`genre-16-${selectedPlatform}`}
         fallbackItems={movieFallbacks}
+        activationDelayMs={750}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}
@@ -680,6 +708,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         fetchPage={fetchVixSrcSeries}
         resetKey={`vixsrc-series-${vixLang}`}
         fallbackItems={seriesFallbacks}
+        activationDelayMs={850}
         onSelect={onSelect}
         onPlay={onPlay}
         onDownload={onDownload}

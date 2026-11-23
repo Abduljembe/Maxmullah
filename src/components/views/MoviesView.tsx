@@ -69,7 +69,10 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
   const pageRef = useRef(1);
   const totalPagesRef = useRef(500);
   const isFetchingMoreRef = useRef(false);
+  const emptyStreakRef = useRef(0);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
+  const fallbackMoviesRef = useRef(initialCatalogMovies);
+  fallbackMoviesRef.current = initialCatalogMovies;
 
   useEffect(() => {
     setActiveFeed(initialFeed);
@@ -146,6 +149,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
       if (pageToLoad === 1 && !append) {
         setIsLoading(true);
         isFetchingMoreRef.current = false;
+        emptyStreakRef.current = 0;
       } else {
         if (isFetchingMoreRef.current) return;
         isFetchingMoreRef.current = true;
@@ -168,7 +172,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
             totalPagesRef.current = maxTotal;
             setHasMorePages(loadedPage < maxTotal);
           } else {
-            const localFiltered = initialCatalogMovies.filter((m) => {
+            const localFiltered = fallbackMoviesRef.current.filter((m) => {
               if (m.type !== 'movie') return false;
               if (debouncedQuery && !m.title.toLowerCase().includes(debouncedQuery.toLowerCase())) {
                 return false;
@@ -183,19 +187,21 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
           }
         } else {
           const result = await fetchBatchForPage(pageToLoad);
+          pageRef.current = pageToLoad;
+          totalPagesRef.current = Math.max(pageToLoad, result.totalPages || totalPagesRef.current);
           if (result.items.length > 0) {
+            emptyStreakRef.current = 0;
             setServerMovies((prev) => deduplicateMedia([...prev, ...result.items]));
-            pageRef.current = pageToLoad;
-            totalPagesRef.current = Math.max(pageToLoad, result.totalPages || 1);
             setHasMorePages(pageToLoad < totalPagesRef.current);
           } else {
-            setHasMorePages(false);
+            emptyStreakRef.current += 1;
+            setHasMorePages(emptyStreakRef.current < 2 && pageToLoad < totalPagesRef.current);
           }
         }
       } catch (err) {
         console.warn('MoviesView loadMovies error:', err);
         if (!append) {
-          setServerMovies(initialCatalogMovies.filter((m) => m.type === 'movie'));
+          setServerMovies(fallbackMoviesRef.current.filter((m) => m.type === 'movie'));
         }
         setHasMorePages(false);
       } finally {
@@ -204,7 +210,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
         isFetchingMoreRef.current = false;
       }
     },
-    [fetchBatchForPage, initialCatalogMovies, debouncedQuery, selectedPlatform]
+    [fetchBatchForPage, debouncedQuery, selectedPlatform]
   );
 
   useEffect(() => {
@@ -223,12 +229,12 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
     loadMovies(pageRef.current + 1, true);
   }, [isLoading, loadMovies]);
 
-  // Dual infinite scroll triggers: IntersectionObserver + window scroll fallback
+  // Dual infinite scroll triggers: IntersectionObserver + window scroll + tall-viewport check
   useEffect(() => {
     const sentinel = bottomSentinelRef.current;
     if (isLoading || !hasMorePages) return;
 
-    const onWindowScroll = () => {
+    const checkNeedMore = () => {
       if (isFetchingMoreRef.current) return;
       const scrollBottom = window.innerHeight + window.scrollY;
       const docHeight = document.documentElement.scrollHeight;
@@ -236,7 +242,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
         handleLoadMore();
       }
     };
-    window.addEventListener('scroll', onWindowScroll, { passive: true });
+    window.addEventListener('scroll', checkNeedMore, { passive: true });
 
     let observer: IntersectionObserver | null = null;
     if (sentinel && typeof IntersectionObserver !== 'undefined') {
@@ -251,11 +257,17 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
       observer.observe(sentinel);
     }
 
+    let rafId = 0;
+    if (!isLoadingMore) {
+      rafId = window.requestAnimationFrame(checkNeedMore);
+    }
+
     return () => {
-      window.removeEventListener('scroll', onWindowScroll);
+      window.removeEventListener('scroll', checkNeedMore);
+      if (rafId) window.cancelAnimationFrame(rafId);
       observer?.disconnect();
     };
-  }, [isLoading, hasMorePages, serverMovies.length, handleLoadMore]);
+  }, [isLoading, isLoadingMore, hasMorePages, serverMovies.length, handleLoadMore]);
 
   const feedTabs = [
     { id: 'popular', label: 'Popular', icon: Flame },

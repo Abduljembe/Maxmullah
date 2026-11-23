@@ -1313,8 +1313,27 @@ export { ErrorOverlay, createHotContext, injectQuery, removeStyle, updateStyle }
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir, { maxAge: '7d', index: false }));
+    app.use(
+      express.static(distDir, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          const baseName = path.basename(filePath);
+          if (
+            baseName === 'index.html' ||
+            baseName === 'sw.js' ||
+            baseName === 'registerSW.js' ||
+            baseName === 'manifest.webmanifest' ||
+            baseName.startsWith('workbox-')
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

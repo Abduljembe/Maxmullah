@@ -3,7 +3,10 @@ import { Play, Download, Check, HardDrive, Info, Star } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
 import { useProfile } from '../../context/ProfileContext';
-import { generateStreamSource } from '../../services/videoProviderService';
+import {
+  generateStreamSource,
+  prefetchLiveServerSources,
+} from '../../services/videoProviderService';
 import { prewarmStreamUrl } from '../../utils/adBlocker';
 
 interface MediaCardProps {
@@ -30,6 +33,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   const typeLabel = media.type === 'series' ? 'SERIES' : 'MOVIE';
 
   const handleMouseEnter = () => {
+    prefetchLiveServerSources(media);
     const stream = generateStreamSource(media);
     prewarmStreamUrl(stream.url);
   };
