@@ -63,11 +63,11 @@ interface TrackOption {
 }
 
 const DEFAULT_FALLBACK_QUEUE: AnyServerId[] = [
-  'vidsrc_su',
   'vidsrc_sh',
   'autoembed',
+  'vidsrc_wtf',
   'vidlink',
-  'vidnest',
+  'vidsrc_su',
 ];
 const DEPRECATED_QUEUE_SERVERS = new Set<AnyServerId>([
   'vidfast',
@@ -132,9 +132,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     media.tmdbId || /^tmdb-(?:movie|tv)-\d+/i.test(media.id || '') || /^\d+$/.test(media.id || '')
   );
 
-  // Automatic server resolution & silent failover queue
+  // Automatic server resolution & native-first direct HLS/MP4 playback
   const [isResolvingServer, setIsResolvingServer] = useState<boolean>(
-    () => !(isOffline && hasPlayableDownloadedFile) && !initialCachedSources && !hasImmediateTmdbId
+    () =>
+      !(isOffline && hasPlayableDownloadedFile) &&
+      !initialDirectUrl &&
+      !isDirectStreamUrl(media.videoPreviewUrl)
   );
   const [serverQueue, setServerQueue] = useState<AnyServerId[]>(() => {
     const cachedList = initialCachedSources?.availableServers?.filter(
@@ -228,7 +231,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       providerCfg.vidukiServer && !DEPRECATED_QUEUE_SERVERS.has(providerCfg.vidukiServer)
         ? providerCfg.vidukiServer
         : DEFAULT_FALLBACK_QUEUE[0];
-    const startedSpeculatively = hasImmediateTmdbId && !isOffline;
+    const startedSpeculatively = false;
 
     const applyResolvedSources = (res: LiveServerSourcesResponse, canSkipReset: boolean) => {
       setLiveSources(res);
@@ -285,7 +288,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
 
     let cancelled = false;
-    setIsResolvingServer(!startedSpeculatively);
+    setIsResolvingServer(true);
     setIframeLoaded(false);
     setRevealTimedOut(false);
     setQueueIndex(0);
@@ -302,7 +305,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               availableServers: DEFAULT_FALLBACK_QUEUE,
               primeSrcHosts: [],
             }),
-          1000
+          2800
         )
       ),
     ]);
@@ -315,7 +318,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, hasImmediateTmdbId, providerCfg.subFile, providerCfg.subLabel, providerCfg.vidukiServer]);
+  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, providerCfg.subFile, providerCfg.subLabel, providerCfg.vidukiServer]);
 
   // Never keep the stream embed hidden behind the loading curtain if a subresource tracker stalls onload
   useEffect(() => {
@@ -818,10 +821,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         enableWorker: true,
         lowLatencyMode: false,
         startLevel: -1,
-        maxBufferLength: 18,
-        maxMaxBufferLength: 45,
-        manifestLoadingTimeOut: 6000,
-        fragLoadingTimeOut: 8000,
+        maxBufferLength: 24,
+        maxMaxBufferLength: 60,
+        manifestLoadingTimeOut: 12000,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingTimeOut: 12000,
+        fragLoadingTimeOut: 15000,
+        fragLoadingMaxRetry: 4,
         backBufferLength: 60,
       });
 

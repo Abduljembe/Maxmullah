@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -736,7 +737,198 @@ async function resolveDirectMediaSource(
     }
   }
 
+  // Fast Server-Side Direct HLS/MP4 Resolver (plays cleanly in native <video>/hls.js with zero iframe blocks or ads)
+  if (tmdbId > 0) {
+    const publicDirect = await resolvePublicDirectStream(type, tmdbId, season, episode);
+    if (publicDirect) {
+      return publicDirect;
+    }
+  }
+
   return null;
+}
+
+const STREAM_ENVELOPE_BASE = 'https://new.vidnest.fun';
+const STREAM_ENVELOPE_REFERER = 'https://vidnest.fun/';
+const STREAM_ENVELOPE_KEY = 'K3p8vQ2mX9rL5wZ0fN7bG1sH4tJ6dC9_y8S3wM1nQ5pL2';
+const ONEHD_WORKER_BASE = 'https://vidrift-cf.money-2.workers.dev';
+
+function appendStreamNonce(rawUrl: string): string {
+  const token = crypto
+    .randomBytes(16)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return `${rawUrl}${rawUrl.includes('?') ? '&' : '?'}_n=${encodeURIComponent(token)}`;
+}
+
+async function decodeStreamEnvelope(payload: unknown): Promise<Record<string, unknown> | null> {
+  if (!payload || typeof payload !== 'object') return null;
+  const envelope = payload as { v?: number; d?: string; n?: string };
+  if (envelope.v !== 2 || typeof envelope.d !== 'string' || typeof envelope.n !== 'string') {
+    return payload as Record<string, unknown>;
+  }
+
+  const keyDigest = crypto
+    .createHash('sha256')
+    .update(`${envelope.n}|${STREAM_ENVELOPE_KEY}`)
+    .digest();
+  let b64 = envelope.d.replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4 !== 0) b64 += '=';
+  const raw = Buffer.from(b64, 'base64');
+  if (raw.length < 28) return null;
+  const iv = raw.subarray(0, 12);
+  const cipherAndTag = raw.subarray(12);
+  const tag = cipherAndTag.subarray(cipherAndTag.length - 16);
+  const cipherText = cipherAndTag.subarray(0, cipherAndTag.length - 16);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', keyDigest, iv);
+  decipher.setAuthTag(tag);
+  const plain = Buffer.concat([decipher.update(cipherText), decipher.final()]).toString('utf8');
+  return JSON.parse(plain) as Record<string, unknown>;
+}
+
+async function resolvePublicDirectStream(
+  type: 'movie' | 'tv',
+  tmdbId: number,
+  season: number,
+  episode: number
+): Promise<DirectMediaResolution | null> {
+  const pathSuffix =
+    type === 'tv' ? `tv/${tmdbId}/${season}/${episode}` : `movie/${tmdbId}`;
+
+  const candidates: Array<{
+    id: string;
+    endpoint: string;
+    baseWorker?: string;
+    defaultReferer: string;
+  }> = [
+    {
+      id: 'flixhq',
+      endpoint: `${STREAM_ENVELOPE_BASE}/flixhq/${pathSuffix}`,
+      defaultReferer: STREAM_ENVELOPE_REFERER,
+    },
+    {
+      id: 'rogflix',
+      endpoint: `${STREAM_ENVELOPE_BASE}/rogflix/${pathSuffix}`,
+      defaultReferer: STREAM_ENVELOPE_REFERER,
+    },
+    {
+      id: 'onehd',
+      endpoint: `${STREAM_ENVELOPE_BASE}/onehd/${pathSuffix}`,
+      baseWorker: ONEHD_WORKER_BASE,
+      defaultReferer: STREAM_ENVELOPE_REFERER,
+    },
+  ];
+
+  const probeSource = async (
+    candidate: (typeof candidates)[number]
+  ): Promise<{ rank: number; resolution: DirectMediaResolution } | null> => {
+    try {
+      const apiRes = await fetch(appendStreamNonce(candidate.endpoint), {
+        headers: {
+          Origin: 'https://vidnest.fun',
+          Referer: STREAM_ENVELOPE_REFERER,
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(2200),
+      });
+      if (!apiRes.ok) return null;
+      const rawJson = await apiRes.json().catch(() => null);
+      const data = await decodeStreamEnvelope(rawJson);
+      if (!data) return null;
+
+      let streamUrl = typeof data.url === 'string' ? data.url.trim() : '';
+      let customRef = candidate.defaultReferer;
+      if (!streamUrl && Array.isArray(data.streams)) {
+        const firstValid = data.streams.find(
+          (s): s is { url?: string; headers?: { Referer?: string } } =>
+            Boolean(s && typeof s === 'object' && typeof (s as { url?: unknown }).url === 'string')
+        );
+        if (firstValid?.url) {
+          streamUrl = firstValid.url.trim();
+          if (firstValid.headers?.Referer) {
+            customRef = firstValid.headers.Referer;
+          }
+        }
+      }
+      if (!streamUrl) return null;
+      if (streamUrl.startsWith('/') && candidate.baseWorker) {
+        streamUrl = `${candidate.baseWorker}${streamUrl}`;
+      }
+
+      const validStream = isAllowedRemoteUrl(streamUrl);
+      const validRef = isAllowedRemoteUrl(customRef);
+      if (!validStream) return null;
+
+      // Verify stream URL actually returns playable playlist/media (not Cloudflare 403 HTML)
+      const isMp4 = /\.mp4(\?|$)/i.test(validStream.pathname);
+      const verifyRes = await fetch(validStream.toString(), {
+        method: isMp4 ? 'HEAD' : 'GET',
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Referer: validRef ? validRef.toString() : STREAM_ENVELOPE_REFERER,
+          Origin: validRef ? validRef.origin : 'https://vidnest.fun',
+        },
+        signal: AbortSignal.timeout(2200),
+      });
+      if (!verifyRes.ok && verifyRes.status !== 206) return null;
+      const ct = (verifyRes.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/html') || ct.includes('application/xhtml+xml')) return null;
+
+      if (!isMp4) {
+        const snippet = (await verifyRes.text()).trimStart();
+        if (!snippet.startsWith('#EXTM3U')) return null;
+      }
+
+      let subtitleUrl: string | undefined;
+      let subtitleLabel: string | undefined;
+      if (Array.isArray(data.subtitles)) {
+        const subs = data.subtitles.filter(
+          (s): s is { url?: string; lang?: string; label?: string } =>
+            Boolean(s && typeof s === 'object' && typeof (s as { url?: unknown }).url === 'string')
+        );
+        const engSub =
+          subs.find((s) => /\b(eng|english)\b/i.test(`${s.lang || ''} ${s.label || ''}`)) ||
+          subs[0];
+        if (engSub?.url) {
+          const fullSub =
+            engSub.url.startsWith('/') && candidate.baseWorker
+              ? `${candidate.baseWorker}${engSub.url}`
+              : engSub.url;
+          const validSub = isAllowedRemoteUrl(fullSub);
+          if (validSub) {
+            subtitleUrl = validSub.toString();
+            subtitleLabel = engSub.label || engSub.lang || 'English';
+          }
+        }
+      }
+
+      const rank = candidate.id === 'flixhq' ? 0 : candidate.id === 'rogflix' ? 1 : 2;
+      return {
+        rank,
+        resolution: {
+          url: validStream.toString(),
+          subtitleUrl,
+          subtitleLabel,
+          referer: validRef ? validRef.toString() : STREAM_ENVELOPE_REFERER,
+        },
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const settled = await Promise.allSettled(candidates.map((c) => probeSource(c)));
+  const validResults = settled
+    .map((r) => (r.status === 'fulfilled' ? r.value : null))
+    .filter((v): v is { rank: number; resolution: DirectMediaResolution } => v !== null)
+    .sort((a, b) => a.rank - b.rank);
+
+  return validResults[0]?.resolution || null;
 }
 
 const EMBED_SHIELD_ALLOWED_HOSTS = new Set([
@@ -1361,6 +1553,7 @@ async function startServer() {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
       Referer: parsedRef ? parsedRef.toString() : `${parsedUrl.origin}/`,
+      Origin: parsedRef ? parsedRef.origin : parsedUrl.origin,
     };
     const rangeHeader = req.headers.range;
     if (typeof rangeHeader === 'string' && /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rangeHeader)) {
