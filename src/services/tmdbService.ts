@@ -39,13 +39,94 @@ export function getTMDBConfiguration(): TMDBConfiguration {
   return activeTMDBConfiguration;
 }
 
+function isJsonResponse(res: Response): boolean {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  return res.ok && ct.includes('application/json');
+}
+
+interface ClientCinemetaItem {
+  id: string;
+  imdb_id?: string;
+  moviedb_id?: number;
+  type?: 'movie' | 'series';
+  name?: string;
+  poster?: string;
+  background?: string;
+  description?: string;
+  releaseInfo?: string;
+  imdbRating?: string;
+  genres?: string[];
+  cast?: string[];
+  director?: string[];
+}
+
+function mapClientCinemetaToRaw(meta: ClientCinemetaItem, isTv: boolean): RawTMDBItem {
+  const yearMatch = (meta.releaseInfo || '').match(/\d{4}/);
+  const yearStr = yearMatch ? `${yearMatch[0]}-01-01` : '2024-01-01';
+  const parsedRating = parseFloat(meta.imdbRating || '');
+  return {
+    id: meta.moviedb_id && meta.moviedb_id > 0 ? meta.moviedb_id : 0,
+    moviedb_id: meta.moviedb_id && meta.moviedb_id > 0 ? meta.moviedb_id : undefined,
+    imdb_id: meta.imdb_id || meta.id,
+    media_type: isTv ? 'tv' : 'movie',
+    title: !isTv ? meta.name : undefined,
+    name: isTv ? meta.name : undefined,
+    poster_path: meta.poster || null,
+    backdrop_path: meta.background || meta.poster || null,
+    release_date: !isTv ? yearStr : undefined,
+    first_air_date: isTv ? yearStr : undefined,
+    overview: meta.description || '',
+    vote_average: Number.isFinite(parsedRating) && parsedRating > 0 ? parsedRating : 0,
+    genres: (meta.genres || []).map((g, idx) => ({ id: idx + 1, name: g })),
+  };
+}
+
+async function fetchClientCinemetaFallback(
+  tmdbPath: string,
+  paramsObj: Record<string, string | number | boolean>
+): Promise<{ results: RawTMDBItem[]; total_pages: number; total_results: number } | null> {
+  const isTv = tmdbPath.includes('tv');
+  const cmType = isTv ? 'series' : 'movie';
+  const query = typeof paramsObj.query === 'string' ? paramsObj.query.trim() : '';
+  const page = Math.max(1, Number(paramsObj.page) || 1);
+  const skip = (page - 1) * 20;
+
+  try {
+    let url = '';
+    if (query) {
+      url = `https://v3-cinemeta.strem.io/catalog/${cmType}/top/search=${encodeURIComponent(query)}.json`;
+    } else if (tmdbPath.includes('top_rated')) {
+      url = skip > 0
+        ? `https://v3-cinemeta.strem.io/catalog/${cmType}/imdbRating/skip=${skip}.json`
+        : `https://v3-cinemeta.strem.io/catalog/${cmType}/imdbRating.json`;
+    } else {
+      url = skip > 0
+        ? `https://v3-cinemeta.strem.io/catalog/${cmType}/top/skip=${skip}.json`
+        : `https://v3-cinemeta.strem.io/catalog/${cmType}/top.json`;
+    }
+
+    const res = await fetch(url);
+    if (!isJsonResponse(res)) return null;
+    const data = (await res.json()) as { metas?: ClientCinemetaItem[] };
+    const metas = Array.isArray(data?.metas) ? data.metas : [];
+    const results = metas.map((m) => mapClientCinemetaToRaw(m, isTv));
+    return {
+      results,
+      total_pages: results.length >= 20 ? page + 10 : page,
+      total_results: Math.max(results.length, page * 20),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function initTMDBConfiguration(forceRefresh = false): Promise<TMDBConfiguration> {
   if (!forceRefresh && configPromise) return configPromise;
 
   const loader = (async () => {
     try {
       const res = await fetch('/api/tmdb/configuration');
-      if (res.ok) {
+      if (isJsonResponse(res)) {
         const data = (await res.json()) as TMDBConfiguration;
         if (data?.images?.secure_base_url && Array.isArray(data.change_keys)) {
           activeTMDBConfiguration = data;
@@ -126,12 +207,13 @@ async function tmdbFetchJson<T = Record<string, unknown>>(
     const queryStr = qs.toString();
     const url = queryStr ? `/api/tmdb/${tmdbPath}?${queryStr}` : `/api/tmdb/${tmdbPath}`;
     const proxyRes = await fetch(url);
-    if (proxyRes.ok) {
+    if (isJsonResponse(proxyRes)) {
       return (await proxyRes.json()) as T;
     }
   } catch {}
 
-  return null;
+  const fallback = await fetchClientCinemetaFallback(tmdbPath, paramsObj);
+  return fallback ? (fallback as unknown as T) : null;
 }
 
 export async function fetchTMDBDetail(
@@ -757,7 +839,7 @@ export async function fetchServerIndexedCatalog(
       qs.set('lang', lang);
     }
     const res = await fetch(`/api/servers/catalog?${qs.toString()}`);
-    if (res.ok) {
+    if (isJsonResponse(res)) {
       const data = (await res.json()) as {
         items?: RawTMDBItem[];
         page?: number;
@@ -773,6 +855,19 @@ export async function fetchServerIndexedCatalog(
         page: data.page || page,
         totalPages: data.totalPages || 1,
         totalResults: data.totalResults || items.length,
+      };
+    }
+
+    const cmFallback = await fetchClientCinemetaFallback(type === 'tv' ? 'tv/popular' : 'movie/popular', { page });
+    if (cmFallback?.results?.length) {
+      const items = cmFallback.results.map((raw) =>
+        normalizeTMDBItem(raw, type === 'tv' ? 'series' : 'movie')
+      );
+      return {
+        items,
+        page,
+        totalPages: cmFallback.total_pages,
+        totalResults: cmFallback.total_results,
       };
     }
   } catch (err) {
@@ -906,7 +1001,7 @@ export async function fetchNewReleasesFeed(tab: NewReleaseFeedTab, page = 1): Pr
   return res.items;
 }
 
-// Live search: uses reliable server-side /api/search proxy (TMDB Bearer/Key + Cinemeta), then TVMaze
+// Live search: uses server-side /api/search proxy, with Cinemeta + TVMaze fallback for static hosts
 export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> {
   const trimmed = query.trim();
   if (!trimmed) return [];
@@ -915,7 +1010,7 @@ export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> 
   try {
     const params = new URLSearchParams({ q: trimmed, page: String(page) });
     const proxyRes = await fetch(`/api/search?${params.toString()}`);
-    if (proxyRes.ok) {
+    if (isJsonResponse(proxyRes)) {
       const data = (await proxyRes.json()) as { results?: RawTMDBItem[] };
       if (Array.isArray(data.results) && data.results.length > 0) {
         return data.results
@@ -925,7 +1020,19 @@ export async function searchTMDB(query: string, page = 1): Promise<MediaItem[]> 
     }
   } catch {}
 
-  // 2. Instant Zero-Key Live Search Fallback via TVMaze
+  // 2. Client-side Cinemeta fallback when /api/* is unavailable (e.g. static GitHub Pages hosting)
+  try {
+    const [movieRes, tvRes] = await Promise.all([
+      fetchClientCinemetaFallback('search/movie', { query: trimmed, page }),
+      fetchClientCinemetaFallback('search/tv', { query: trimmed, page }),
+    ]);
+    const combined = [...(movieRes?.results || []), ...(tvRes?.results || [])];
+    if (combined.length > 0) {
+      return combined.map((item) => normalizeTMDBItem(item));
+    }
+  } catch {}
+
+  // 3. Instant Zero-Key Live Search Fallback via TVMaze
   try {
     const res = await fetch(
       `${TVMAZE_BASE_URL}/search/shows?q=${encodeURIComponent(trimmed)}`

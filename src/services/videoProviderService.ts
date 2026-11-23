@@ -910,7 +910,8 @@ export async function fetchLiveServerSources(
       if (isLikelyAnime(media) && !media.malId) params.set('isAnime', '1');
 
       const res = await fetch(`/api/servers/sources?${params.toString()}`);
-      if (res.ok) {
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (res.ok && contentType.includes('application/json')) {
         const data = (await res.json()) as Partial<LiveServerSourcesResponse>;
         const normalized: LiveServerSourcesResponse = {
           directStreamUrl: data.directStreamUrl,
@@ -935,9 +936,10 @@ export async function fetchLiveServerSources(
     }
 
     return {
-      vidlinkAvailable: false,
-      vixsrcAvailable: false,
-      availableServers: ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'],
+      vidlinkAvailable: true,
+      vixsrcAvailable: true,
+      recommendedServer: 'vidlink',
+      availableServers: ['vidlink', 'vixsrc', 'vidfast', 'vidsrc_sh'],
       primeSrcHosts: [],
     };
   })();
