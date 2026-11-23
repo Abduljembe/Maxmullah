@@ -17,6 +17,7 @@ import {
   Settings,
   Captions,
   Check,
+  RefreshCw,
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { MediaItem } from '../../types';
@@ -112,13 +113,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       : 'stream'
   );
 
+  const [providerCfg] = useState(() => getVideoProviderConfig());
+
+  const hasImmediateTmdbId = Boolean(
+    media.tmdbId || /^tmdb-(?:movie|tv)-\d+/i.test(media.id || '') || /^\d+$/.test(media.id || '')
+  );
+
   // Automatic server resolution & silent failover queue
   const [isResolvingServer, setIsResolvingServer] = useState<boolean>(
-    () => !(isOffline && hasPlayableDownloadedFile) && !initialCachedSources
+    () => !(isOffline && hasPlayableDownloadedFile) && !initialCachedSources && !hasImmediateTmdbId
   );
   const [serverQueue, setServerQueue] = useState<AnyServerId[]>(() => {
     const cachedList = initialCachedSources?.availableServers?.filter((s) => s !== 'primesrc');
-    return cachedList && cachedList.length > 0 ? cachedList : DEFAULT_FALLBACK_QUEUE;
+    const base = cachedList && cachedList.length > 0 ? cachedList : DEFAULT_FALLBACK_QUEUE;
+    const pref =
+      providerCfg.vidukiServer && providerCfg.vidukiServer !== 'primesrc'
+        ? providerCfg.vidukiServer
+        : null;
+    return pref ? [pref, ...base.filter((s) => s !== pref)] : base;
   });
   const [queueIndex, setQueueIndex] = useState<number>(0);
   const [iframeKey, setIframeKey] = useState<number>(0);
@@ -163,7 +175,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [subtitleTracks, setSubtitleTracks] = useState<TrackOption[]>([]);
   const [selectedSubtitleTrack, setSelectedSubtitleTrack] = useState<number>(-1);
 
-  const [providerCfg] = useState(() => getVideoProviderConfig());
   const [startAtSeconds, setStartAtSeconds] = useState<number>(() => {
     const localResume = getSavedResumeSeconds(media.id, seasonNumber || 1, episodeNumber || 1);
     const vidLinkResume = getVidLinkResumeSeconds(media, seasonNumber || 1, episodeNumber || 1);
@@ -197,7 +208,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       return;
     }
 
-    const applyResolvedSources = (res: LiveServerSourcesResponse) => {
+    const preferredInit =
+      providerCfg.vidukiServer && providerCfg.vidukiServer !== 'primesrc'
+        ? providerCfg.vidukiServer
+        : DEFAULT_FALLBACK_QUEUE[0];
+    const startedSpeculatively = hasImmediateTmdbId && !isOffline;
+
+    const applyResolvedSources = (res: LiveServerSourcesResponse, canSkipReset: boolean) => {
       setLiveSources(res);
       const resolvedSub = res.directStreamSubtitleUrl || providerCfg.subFile || '';
       const resolvedSubLabel = res.directStreamSubtitleLabel || providerCfg.subLabel || 'English';
@@ -224,27 +241,39 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           ? res.availableServers.filter((srv) => srv !== 'primesrc')
           : DEFAULT_FALLBACK_QUEUE;
 
-      setServerQueue(verified.length > 0 ? verified : DEFAULT_FALLBACK_QUEUE);
-      setQueueIndex(0);
+      const preferred =
+        providerCfg.vidukiServer && providerCfg.vidukiServer !== 'primesrc'
+          ? providerCfg.vidukiServer
+          : null;
+      const ordered = preferred
+        ? [preferred, ...verified.filter((s) => s !== preferred)]
+        : verified;
+
+      const nextQueue = ordered.length > 0 ? ordered : DEFAULT_FALLBACK_QUEUE;
+      setServerQueue(nextQueue);
       setPlayerMode('stream');
       setIsResolvingServer(false);
-      setIframeLoaded(false);
-      setIframeKey((k) => k + 1);
+
+      if (!canSkipReset || nextQueue[0] !== preferredInit) {
+        setQueueIndex(0);
+        setIframeLoaded(false);
+        setIframeKey((k) => k + 1);
+      }
     };
 
     const cached = getCachedLiveServerSources(media, currentSeason, currentEpisode);
     if (cached) {
-      applyResolvedSources(cached);
+      applyResolvedSources(cached, false);
       return;
     }
 
     let cancelled = false;
-    setIsResolvingServer(true);
+    setIsResolvingServer(!startedSpeculatively);
     setIframeLoaded(false);
     setQueueIndex(0);
 
     const resolveWithTimeout = Promise.race<LiveServerSourcesResponse>([
-      fetchLiveServerSources(media, currentSeason, currentEpisode),
+      fetchLiveServerSources(media, currentSeason, currentEpisode, { fast: true }),
       new Promise<LiveServerSourcesResponse>((resolve) =>
         window.setTimeout(
           () =>
@@ -254,22 +283,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               availableServers: DEFAULT_FALLBACK_QUEUE,
               primeSrcHosts: [],
             }),
-          2800
+          1000
         )
       ),
     ]);
 
     resolveWithTimeout.then((res) => {
       if (cancelled) return;
-      applyResolvedSources(res);
+      applyResolvedSources(res, startedSpeculatively);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, providerCfg.subFile, providerCfg.subLabel]);
+  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, hasImmediateTmdbId, providerCfg.subFile, providerCfg.subLabel, providerCfg.vidukiServer]);
 
-  // Silent automatic failover across verified servers if embed stream stalls
+  // Fast silent failover across verified servers if embed frame stalls loading
   useEffect(() => {
     if (isResolvingServer || playerMode !== 'stream' || iframeLoaded) return;
     if (queueIndex >= serverQueue.length - 1) return;
@@ -278,7 +307,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       setQueueIndex((prev) => (prev < serverQueue.length - 1 ? prev + 1 : prev));
       setIframeLoaded(false);
       setIframeKey((k) => k + 1);
-    }, 5200);
+    }, 3200);
 
     return () => window.clearTimeout(timeout);
   }, [isResolvingServer, playerMode, iframeLoaded, queueIndex, serverQueue.length, iframeKey]);
@@ -749,7 +778,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
-        backBufferLength: 90,
+        startLevel: -1,
+        maxBufferLength: 18,
+        maxMaxBufferLength: 45,
+        manifestLoadingTimeOut: 6000,
+        fragLoadingTimeOut: 8000,
+        backBufferLength: 60,
       });
 
       hls.loadSource(effectiveNativeSource);
@@ -906,7 +940,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             title={media.title}
             onLoad={(e) => {
               injectAdShieldIntoIframe(e.currentTarget);
-              window.setTimeout(() => setIframeLoaded(true), 220);
+              setIframeLoaded(true);
             }}
             onError={() => {
               if (queueIndex < serverQueue.length - 1) {
@@ -918,7 +952,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             referrerPolicy="origin"
             allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *; accelerometer; gyroscope; clipboard-write; web-share"
             allowFullScreen
-            className={`w-full h-full border-0 bg-black transition-opacity duration-200 ${
+            className={`w-full h-full border-0 bg-black transition-opacity duration-150 ${
               iframeLoaded ? 'opacity-100' : 'opacity-0'
             }`}
           />
@@ -932,8 +966,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             ref={videoRef}
             playsInline
             autoPlay
+            preload="auto"
             crossOrigin={proxiedSubtitleUrl ? 'anonymous' : undefined}
             onTimeUpdate={handleTimeUpdate}
+            onCanPlay={() => setIsLoading(false)}
             onWaiting={() => setIsLoading(true)}
             onPlaying={() => {
               setIsLoading(false);
@@ -1333,6 +1369,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               aria-label="Toggle Downloaded Media"
             >
               <HardDrive className="w-4 h-4" />
+            </button>
+          )}
+
+          {playerMode === 'stream' && serverQueue.length > 1 && (
+            <button
+              onClick={() => {
+                setQueueIndex((prev) => (prev + 1) % serverQueue.length);
+                setIframeLoaded(false);
+                setIframeKey((k) => k + 1);
+              }}
+              className="p-2.5 rounded-full bg-black/55 hover:bg-black/80 text-white/85 hover:text-white border border-white/10 backdrop-blur-md transition-colors cursor-pointer"
+              aria-label="Switch mirror"
+              title="Switch mirror"
+            >
+              <RefreshCw className="w-4 h-4" />
             </button>
           )}
         </div>

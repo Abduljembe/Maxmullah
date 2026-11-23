@@ -152,6 +152,7 @@ const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
 const searchCache = new Map<string, { results: Record<string, unknown>[]; fetchedAt: number }>();
 const malIdCache = new Map<string, { malId: number | null; fetchedAt: number }>();
+const sourcesResponseCache = new Map<string, { data: Record<string, unknown>; fetchedAt: number }>();
 let tmdbConfigCache: { data: TMDBConfigurationPayload; fetchedAt: number } | null = null;
 
 const INDEX_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -159,6 +160,7 @@ const TMDB_CACHE_TTL_MS = 60 * 60 * 1000;
 const TMDB_CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const TMDB_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
+const SOURCES_CACHE_TTL_MS = 5 * 60 * 1000;
 
 let streamsStoreCache: Record<string, SavedStreamEntry> | null = null;
 
@@ -714,18 +716,22 @@ async function resolveDirectMediaSource(
             `${cdnBase.toString().replace(/\/+$/, '')}/${idSlug}.mp4`,
           ];
 
-    for (const candidate of candidates) {
-      try {
+    const probeResults = await Promise.allSettled(
+      candidates.map(async (candidate) => {
         const probe = await fetch(candidate, {
           method: 'HEAD',
-          signal: AbortSignal.timeout(1600),
+          signal: AbortSignal.timeout(1100),
         });
         const ct = (probe.headers.get('content-type') || '').toLowerCase();
         if (probe.ok && !ct.includes('text/html')) {
-          return { url: candidate };
+          return candidate;
         }
-      } catch {
-        // Continue trying candidate paths
+        throw new Error('not playable');
+      })
+    );
+    for (const r of probeResults) {
+      if (r.status === 'fulfilled' && r.value) {
+        return { url: r.value };
       }
     }
   }
@@ -919,6 +925,7 @@ async function startServer() {
     };
     store[key] = entry;
     await writeStreamsStore(store);
+    sourcesResponseCache.clear();
     res.json({ ok: true, key, entry });
   });
 
@@ -936,6 +943,7 @@ async function startServer() {
     const key = makeStreamKey(type, id, season, episode);
     delete store[key];
     await writeStreamsStore(store);
+    sourcesResponseCache.clear();
     res.json({ ok: true });
   });
 
@@ -1137,6 +1145,7 @@ async function startServer() {
     const initialImdbId = typeof req.query.imdbId === 'string' ? req.query.imdbId.trim() : '';
     const titleHint = typeof req.query.title === 'string' ? req.query.title.trim() : '';
     const isAnimeHint = req.query.isAnime === '1';
+    const isFastMode = req.query.fast === '1';
     const type = req.query.type === 'series' || req.query.type === 'tv' ? 'tv' : 'movie';
     const season = Math.max(1, parseInt(String(req.query.season || '1'), 10) || 1);
     const episode = Math.max(1, parseInt(String(req.query.episode || '1'), 10) || 1);
@@ -1146,12 +1155,24 @@ async function startServer() {
       return;
     }
 
+    const sourceCacheKey = `${type}:${rawTmdbId || initialImdbId}:s${season}e${episode}:${isFastMode ? 'fast' : 'full'}`;
+    const cachedSources = sourcesResponseCache.get(sourceCacheKey);
+    if (cachedSources && Date.now() - cachedSources.fetchedAt < SOURCES_CACHE_TTL_MS) {
+      res.json(cachedSources.data);
+      return;
+    }
+
     try {
-      const vixStore = await getVixSrcIndexStore(type);
+      // Never block playback on a cold 10s VixSrc catalog fetch; use warm cache if available
+      const vixStore = vixsrcIndexCache.get(type);
+      if (!vixStore) {
+        void getVixSrcIndexStore(type);
+      }
+
       let tmdbId = rawTmdbId;
 
       if (!tmdbId && initialImdbId.startsWith('tt')) {
-        const vixMatch = vixStore.data.find((entry) => entry.imdb_id === initialImdbId && entry.tmdb_id > 0);
+        const vixMatch = vixStore?.data.find((entry) => entry.imdb_id === initialImdbId && entry.tmdb_id > 0);
         if (vixMatch) {
           tmdbId = vixMatch.tmdb_id;
         }
@@ -1161,7 +1182,7 @@ async function startServer() {
         const findData = await fetchTMDB<{
           movie_results?: Array<{ id: number }>;
           tv_results?: Array<{ id: number }>;
-        }>(`find/${encodeURIComponent(initialImdbId)}`, { external_source: 'imdb_id' }, 4000);
+        }>(`find/${encodeURIComponent(initialImdbId)}`, { external_source: 'imdb_id' }, 1400);
         if (findData) {
           const list = type === 'tv' ? findData.tv_results : findData.movie_results;
           if (list && list[0]?.id > 0) {
@@ -1187,54 +1208,71 @@ async function startServer() {
         type === 'tv'
           ? `https://vidlink.pro/tv/${targetId}/${season}/${episode}`
           : `https://vidlink.pro/movie/${targetId}`;
-
       const vixEmbedUrl =
         type === 'tv'
           ? `https://vixsrc.to/tv/${targetId}/${season}/${episode}`
           : `https://vixsrc.to/movie/${targetId}`;
 
-      const [streamsStore, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb, resolvedMalId] = await Promise.all([
-        readStreamsStore(),
-        fetch(primeUrl, {
-          headers: {
-            Referer:
-              type === 'tv'
-                ? `https://primesrc.me/embed/tv?${targetParam}&season=${season}&episode=${episode}`
-                : `https://primesrc.me/embed/movie?${targetParam}`,
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          },
-          signal: AbortSignal.timeout(4500),
-        })
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null),
-        tmdbId > 0
-          ? fetch(vidlinkUrl, {
-              headers: {
-                'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-              },
-              signal: AbortSignal.timeout(4000),
-            })
-              .then((r) => r.status === 200)
-              .catch(() => false)
-          : Promise.resolve(false),
-        tmdbId > 0
-          ? fetch(vixEmbedUrl, {
-              headers: {
-                'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-              },
-              signal: AbortSignal.timeout(3000),
-            })
-              .then((r) => r.status === 200)
-              .catch(() => false)
-          : Promise.resolve(false),
-        !initialImdbId && tmdbId > 0
-          ? resolveImdbIdFromTMDB(type, tmdbId)
-          : Promise.resolve(initialImdbId || null),
-        isAnimeHint && titleHint ? resolveMalIdByTitle(titleHint) : Promise.resolve(null),
-      ]);
+      const streamsStore = await readStreamsStore();
+      const savedDirectEntry =
+        streamsStore[makeStreamKey(type, targetId, season, episode)] ||
+        (initialImdbId ? streamsStore[makeStreamKey(type, initialImdbId, season, episode)] : undefined);
+
+      // Run direct resolution & optional remote probes concurrently
+      const [directResolution, primeResult, vidlinkOk, vixEmbedOk, resolvedImdb, resolvedMalId] =
+        await Promise.all([
+          resolveDirectMediaSource(
+            type,
+            tmdbId,
+            initialImdbId || undefined,
+            season,
+            episode,
+            savedDirectEntry
+          ),
+          !isFastMode
+            ? fetch(primeUrl, {
+                headers: {
+                  Referer:
+                    type === 'tv'
+                      ? `https://primesrc.me/embed/tv?${targetParam}&season=${season}&episode=${episode}`
+                      : `https://primesrc.me/embed/movie?${targetParam}`,
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                },
+                signal: AbortSignal.timeout(2000),
+              })
+                .then((r) => (r.ok ? r.json() : null))
+                .catch(() => null)
+            : Promise.resolve(null),
+          !isFastMode && tmdbId > 0
+            ? fetch(vidlinkUrl, {
+                method: 'HEAD',
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                },
+                signal: AbortSignal.timeout(1500),
+              })
+                .then((r) => r.status === 200)
+                .catch(() => false)
+            : Promise.resolve(tmdbId > 0),
+          !isFastMode && tmdbId > 0
+            ? fetch(vixEmbedUrl, {
+                method: 'HEAD',
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                },
+                signal: AbortSignal.timeout(1500),
+              })
+                .then((r) => r.status === 200)
+                .catch(() => false)
+            : Promise.resolve(false),
+          !isFastMode && !initialImdbId && tmdbId > 0
+            ? resolveImdbIdFromTMDB(type, tmdbId)
+            : Promise.resolve(initialImdbId || null),
+          isAnimeHint && titleHint ? resolveMalIdByTitle(titleHint) : Promise.resolve(null),
+        ]);
 
       let primeSrcHosts: PrimeSrcHost[] = [];
       let primeInfo: Record<string, unknown> | null = null;
@@ -1252,53 +1290,50 @@ async function startServer() {
       }
 
       const finalImdbId = resolvedImdb || initialImdbId || undefined;
-      const savedDirectEntry =
-        streamsStore[makeStreamKey(type, targetId, season, episode)] ||
-        (finalImdbId ? streamsStore[makeStreamKey(type, finalImdbId, season, episode)] : undefined);
-
-      const directResolution = await resolveDirectMediaSource(
-        type,
-        tmdbId,
-        finalImdbId,
-        season,
-        episode,
-        savedDirectEntry
-      );
-
       const inVixCatalog =
-        (tmdbId > 0 && vixStore.tmdbSet.has(tmdbId)) ||
-        Boolean(finalImdbId && vixStore.imdbSet.has(finalImdbId));
+        Boolean(vixStore && ((tmdbId > 0 && vixStore.tmdbSet.has(tmdbId)) ||
+        (finalImdbId && vixStore.imdbSet.has(finalImdbId))));
       const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
-      let recommendedServer: 'vixsrc' | 'vidfast' | 'primesrc' | 'vidlink' = 'vidlink';
-      if (vidlinkOk) {
-        recommendedServer = 'vidlink';
-      } else if (vixsrcAvailable) {
-        recommendedServer = 'vixsrc';
-      } else {
-        recommendedServer = 'vidfast';
-      }
+      const availableServers: Array<'vidlink' | 'vidfast' | 'vixsrc' | 'vidsrc_sh' | '2embed'> = [
+        'vidlink',
+        'vidfast',
+      ];
+      if (vixsrcAvailable) availableServers.push('vixsrc');
+      availableServers.push('vidsrc_sh', '2embed');
 
-      res.json({
+      const recommendedServer: 'vixsrc' | 'vidfast' | 'vidlink' = vidlinkOk
+        ? 'vidlink'
+        : vixsrcAvailable
+        ? 'vixsrc'
+        : 'vidfast';
+
+      const payload = {
         directStreamUrl: directResolution?.url,
         directStreamSubtitleUrl: directResolution?.subtitleUrl,
         directStreamSubtitleLabel: directResolution?.subtitleLabel,
         directStreamReferer: directResolution?.referer,
         vidlinkAvailable: vidlinkOk,
+        vidfastAvailable: true,
         vixsrcAvailable,
+        availableServers,
         primeSrcHosts,
         resolvedTmdbId: tmdbId > 0 ? tmdbId : undefined,
         resolvedImdbId: finalImdbId,
         resolvedMalId: resolvedMalId || undefined,
         recommendedServer,
         info: primeInfo,
-      });
+      };
+
+      sourcesResponseCache.set(sourceCacheKey, { data: payload, fetchedAt: Date.now() });
+      res.json(payload);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to probe server sources';
       res.status(502).json({
         error: msg,
         vidlinkAvailable: false,
         vixsrcAvailable: false,
+        availableServers: ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'],
         primeSrcHosts: [],
       });
     }
@@ -1865,6 +1900,12 @@ export { ErrorOverlay, createHotContext, injectQuery, removeStyle, updateStyle }
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`MullahMax server running on http://0.0.0.0:${PORT}`);
+    // Pre-warm stream & VixSrc index caches asynchronously on startup
+    setTimeout(() => {
+      void readStreamsStore();
+      void getVixSrcIndexStore('movie');
+      void getVixSrcIndexStore('tv');
+    }, 300);
   });
 }
 

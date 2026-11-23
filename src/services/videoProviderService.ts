@@ -964,21 +964,28 @@ export function getCachedLiveServerSources(
 export function prefetchLiveServerSources(media: MediaItem, season = 1, episode = 1): void {
   if (typeof window === 'undefined') return;
   if (getCachedLiveServerSources(media, season, episode)) return;
-  void fetchLiveServerSources(media, season, episode);
+  void fetchLiveServerSources(media, season, episode, { fast: true });
 }
 
 export async function fetchLiveServerSources(
   media: MediaItem,
   season = 1,
-  episode = 1
+  episode = 1,
+  options?: { fast?: boolean }
 ): Promise<LiveServerSourcesResponse> {
+  const fast = options?.fast !== false;
   const key = makeClientSourcesCacheKey(media, season, episode);
   const cached = clientSourcesCache.get(key);
-  if (cached && Date.now() - cached.fetchedAt < CLIENT_SOURCES_TTL_MS) {
+  if (
+    cached &&
+    Date.now() - cached.fetchedAt < CLIENT_SOURCES_TTL_MS &&
+    (fast || cached.data.primeSrcHosts.length > 0)
+  ) {
     return cached.data;
   }
 
-  const existingInflight = clientSourcesInflight.get(key);
+  const inflightKey = `${key}:${fast ? 'fast' : 'full'}`;
+  const existingInflight = clientSourcesInflight.get(inflightKey);
   if (existingInflight) {
     return existingInflight;
   }
@@ -995,6 +1002,7 @@ export async function fetchLiveServerSources(
         season: String(Math.max(1, season)),
         episode: String(Math.max(1, episode)),
       });
+      if (fast) params.set('fast', '1');
       if (tmdbId) params.set('tmdbId', tmdbId);
       if (imdbId) params.set('imdbId', imdbId);
       if (media.title) params.set('title', media.title);
@@ -1026,19 +1034,19 @@ export async function fetchLiveServerSources(
     } catch (err) {
       console.warn('fetchLiveServerSources error:', err);
     } finally {
-      clientSourcesInflight.delete(key);
+      clientSourcesInflight.delete(inflightKey);
     }
 
     return {
       vidlinkAvailable: true,
-      vixsrcAvailable: true,
+      vixsrcAvailable: false,
       recommendedServer: 'vidlink',
-      availableServers: ['vidlink', 'vixsrc', 'vidfast', 'vidsrc_sh'],
+      availableServers: ['vidlink', 'vidfast', 'vidsrc_sh', '2embed'],
       primeSrcHosts: [],
     };
   })();
 
-  clientSourcesInflight.set(key, requestPromise);
+  clientSourcesInflight.set(inflightKey, requestPromise);
   return requestPromise;
 }
 

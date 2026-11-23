@@ -22,6 +22,7 @@ import {
   getSavedDirectStream,
   saveCustomDirectStream,
   removeCustomDirectStream,
+  prefetchLiveServerSources,
 } from '../../services/videoProviderService';
 
 interface MediaDetailModalProps {
@@ -60,7 +61,8 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
 
   useEffect(() => {
     let active = true;
-    const epNum = media.type === 'series' ? 1 : 1;
+    const epNum = 1;
+    prefetchLiveServerSources(media, selectedSeason, epNum);
     getSavedDirectStream(media, selectedSeason, epNum).then((entry) => {
       if (!active) return;
       if (entry?.url) {

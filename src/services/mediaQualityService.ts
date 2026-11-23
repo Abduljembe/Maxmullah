@@ -40,7 +40,7 @@ export async function fetchServerQualities(
   let detected720Mb: number | null = null;
 
   try {
-    const live = await fetchLiveServerSources(media, seasonNum || 1, episodeNum || 1);
+    const live = await fetchLiveServerSources(media, seasonNum || 1, episodeNum || 1, { fast: false });
     for (const host of live.primeSrcHosts) {
       const name = (host.file_name || '').toLowerCase();
       const parsedMb = parseFileSizeMb(host.file_size);
