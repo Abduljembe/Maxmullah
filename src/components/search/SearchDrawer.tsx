@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { MediaItem, MediaType } from '../../types';
 import { MediaCard } from '../cards/MediaCard';
-import { searchTMDB } from '../../services/tmdbService';
+import { searchTMDB, normalizeGenreLabel } from '../../services/tmdbService';
 
 interface SearchDrawerProps {
   catalog: MediaItem[];
@@ -63,7 +63,12 @@ export const SearchDrawer: React.FC<SearchDrawerProps> = ({
   // Extract all distinct genres safely
   const allGenres = useMemo(() => {
     const set = new Set<string>();
-    catalog.forEach((m) => (m.genres || []).forEach((g) => set.add(g)));
+    catalog.forEach((m) =>
+      (m.genres || []).forEach((g) => {
+        const norm = normalizeGenreLabel(g);
+        if (norm) set.add(norm);
+      })
+    );
     return Array.from(set).sort();
   }, [catalog]);
 
@@ -101,7 +106,12 @@ export const SearchDrawer: React.FC<SearchDrawerProps> = ({
       if (selectedType !== 'all' && item.type !== selectedType) return false;
 
       // Genre filter
-      if (selectedGenre !== 'all' && !(item.genres || []).includes(selectedGenre)) return false;
+      if (
+        selectedGenre !== 'all' &&
+        !(item.genres || []).some((g) => normalizeGenreLabel(g) === selectedGenre)
+      ) {
+        return false;
+      }
 
       // Min rating score
       if (minRating > 0 && (item.imdbScore || 0) < minRating) return false;
@@ -142,7 +152,12 @@ export const SearchDrawer: React.FC<SearchDrawerProps> = ({
     // Add live results
     liveResults.forEach((item) => {
       if (selectedType !== 'all' && item.type !== selectedType) return;
-      if (selectedGenre !== 'all' && !(item.genres || []).includes(selectedGenre)) return;
+      if (
+        selectedGenre !== 'all' &&
+        !(item.genres || []).some((g) => normalizeGenreLabel(g) === selectedGenre)
+      ) {
+        return;
+      }
       if (minRating > 0 && (item.imdbScore || 0) < minRating) return;
 
       // Don't add duplicate by title

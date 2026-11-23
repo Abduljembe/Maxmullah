@@ -313,6 +313,63 @@ const TMDB_GENRES: Record<number, string> = {
   10768: 'War & Politics',
 };
 
+export function normalizeGenreLabel(rawGenre: string): string {
+  const trimmed = (rawGenre || '').trim();
+  if (!trimmed) return '';
+  const lower = trimmed.toLowerCase();
+  if (lower === 'sci-fi & fantasy' || lower === 'science fiction & fantasy') {
+    return 'Sci-Fi & Fantasy';
+  }
+  if (
+    lower === 'science fiction' ||
+    lower === 'science-fiction' ||
+    lower === 'sci-fi' ||
+    lower === 'sci fiction' ||
+    lower === 'scifi'
+  ) {
+    return 'Sci-Fi';
+  }
+  if (lower === 'animation' || lower === 'animated') {
+    return 'Animation';
+  }
+  if (lower === 'comedy' || lower === 'comedies') {
+    return 'Comedy';
+  }
+  return trimmed;
+}
+
+export function mediaMatchesGenreId(media: MediaItem, genreId: number): boolean {
+  if (!genreId || genreId <= 0) return true;
+  const itemGenres = (media.genres || []).map((g) => normalizeGenreLabel(g).toLowerCase());
+  if (itemGenres.length === 0) return false;
+
+  if (genreId === 878) {
+    return itemGenres.some(
+      (g) => g === 'sci-fi' || g === 'sci-fi & fantasy' || g.includes('science fiction') || g.includes('sci-fi')
+    );
+  }
+  if (genreId === 35) {
+    return itemGenres.some((g) => g === 'comedy' || g.includes('comedy'));
+  }
+  if (genreId === 16) {
+    return itemGenres.some((g) => g === 'animation' || g === 'anime' || g.includes('animat'));
+  }
+  if (genreId === 10765) {
+    return itemGenres.some(
+      (g) => g === 'sci-fi & fantasy' || g === 'sci-fi' || g === 'fantasy'
+    );
+  }
+  if (genreId === 10759) {
+    return itemGenres.some(
+      (g) => g === 'action & adventure' || g === 'action' || g === 'adventure'
+    );
+  }
+
+  const target = normalizeGenreLabel(TMDB_GENRES[genreId] || '').toLowerCase();
+  if (!target) return true;
+  return itemGenres.includes(target);
+}
+
 function mapProviderNameToPlatform(providerName: string): StreamingPlatform | null {
   const norm = providerName.toLowerCase();
   if (norm.includes('netflix')) return 'Netflix';
@@ -372,18 +429,22 @@ export function normalizeTMDBItem(raw: RawTMDBItem, forcedType?: 'movie' | 'seri
   const releaseYear = (rawDate || '2025').slice(0, 4);
   const year = parseInt(releaseYear, 10) || 2025;
 
-  const genres: string[] = [];
+  const genreSet = new Set<string>();
   if (raw.genres) {
-    genres.push(
-      ...raw.genres
-        .map((g) => (typeof g === 'string' ? g : g.name))
-        .filter(Boolean)
-    );
-  } else if (raw.genre_ids) {
-    raw.genre_ids.forEach((id) => {
-      if (TMDB_GENRES[id]) genres.push(TMDB_GENRES[id]);
+    raw.genres.forEach((g) => {
+      const label = normalizeGenreLabel(typeof g === 'string' ? g : g.name);
+      if (label) genreSet.add(label);
     });
   }
+  if (raw.genre_ids) {
+    raw.genre_ids.forEach((id) => {
+      if (TMDB_GENRES[id]) {
+        const label = normalizeGenreLabel(TMDB_GENRES[id]);
+        if (label) genreSet.add(label);
+      }
+    });
+  }
+  const genres = Array.from(genreSet);
   if (genres.length === 0) genres.push('Drama');
 
   const platformsSet = new Set<StreamingPlatform>();

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Loader2, Plus } from 'lucide-react';
 import { MediaItem, StreamingPlatform } from '../../types';
 import {
@@ -9,6 +9,7 @@ import {
   fetchServerIndexedCatalog,
   fetchServerMovies,
   fetchServerSeries,
+  mediaMatchesGenreId,
 } from '../../services/tmdbService';
 import { MediaCard } from '../cards/MediaCard';
 
@@ -47,6 +48,7 @@ interface InfiniteCinemaRowProps {
   fetchPage: (page: number) => Promise<FetchServerMoviesResult>;
   resetKey: string;
   fallbackItems: MediaItem[];
+  mergeFallbackWithResults?: boolean;
   eager?: boolean;
   activationDelayMs?: number;
   onSelect: (media: MediaItem) => void;
@@ -62,6 +64,7 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
   fetchPage,
   resetKey,
   fallbackItems,
+  mergeFallbackWithResults = false,
   eager = false,
   activationDelayMs = 350,
   onSelect,
@@ -233,7 +236,11 @@ const InfiniteCinemaRow: React.FC<InfiniteCinemaRowProps> = ({
     }
   };
 
-  const renderedItems = items.length > 0 ? items : fallbackItems;
+  const renderedItems = useMemo(() => {
+    if (items.length === 0) return fallbackItems;
+    if (!mergeFallbackWithResults || fallbackItems.length === 0) return items;
+    return deduplicateItems([...items, ...fallbackItems]);
+  }, [items, fallbackItems, mergeFallbackWithResults]);
 
   return (
     <section
@@ -362,8 +369,41 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
     return filtered.length > 0 ? filtered : list;
   };
 
-  const movieFallbacks = filterPlatformClient(fallbackCatalog.filter((m) => m.type === 'movie'));
+  const catalogMovies = useMemo(
+    () => fallbackCatalog.filter((m) => m.type === 'movie'),
+    [fallbackCatalog]
+  );
+  const strictPlatformMovies = useMemo(
+    () =>
+      selectedPlatform === 'ALL'
+        ? catalogMovies
+        : catalogMovies.filter((m) => m.platforms.includes(selectedPlatform)),
+    [catalogMovies, selectedPlatform]
+  );
+
+  const movieFallbacks = filterPlatformClient(catalogMovies);
   const seriesFallbacks = filterPlatformClient(fallbackCatalog.filter((m) => m.type === 'series'));
+
+  const actionFallbacks = useMemo(
+    () => movieFallbacks.filter((m) => mediaMatchesGenreId(m, 28)),
+    [movieFallbacks]
+  );
+  const sciFiFallbacks = useMemo(
+    () => strictPlatformMovies.filter((m) => mediaMatchesGenreId(m, 878)),
+    [strictPlatformMovies]
+  );
+  const comedyFallbacks = useMemo(
+    () => strictPlatformMovies.filter((m) => mediaMatchesGenreId(m, 35)),
+    [strictPlatformMovies]
+  );
+  const horrorFallbacks = useMemo(
+    () => movieFallbacks.filter((m) => mediaMatchesGenreId(m, 27)),
+    [movieFallbacks]
+  );
+  const animationFallbacks = useMemo(
+    () => strictPlatformMovies.filter((m) => mediaMatchesGenreId(m, 16)),
+    [strictPlatformMovies]
+  );
 
   const fetchTrendingMovies = useCallback(
     (page: number) =>
@@ -441,8 +481,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
       fetchServerMovies({
         feed: 'popular',
         genreId: 878,
-        withoutGenres: '28,16',
-        minVotes: 250,
+        minVotes: 50,
         page,
         watchProviderId,
       }),
@@ -454,8 +493,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
       fetchServerMovies({
         feed: 'popular',
         genreId: 35,
-        withoutGenres: '28,27,16',
-        minVotes: 300,
+        minVotes: 50,
         page,
         watchProviderId,
       }),
@@ -479,7 +517,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
       fetchServerMovies({
         feed: 'popular',
         genreId: 16,
-        minVotes: 250,
+        minVotes: 50,
         page,
         watchProviderId,
       }),
@@ -642,7 +680,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         title="Action movies"
         fetchPage={fetchActionMovies}
         resetKey={`genre-28-${selectedPlatform}`}
-        fallbackItems={movieFallbacks}
+        fallbackItems={actionFallbacks}
         activationDelayMs={350}
         onSelect={onSelect}
         onPlay={onPlay}
@@ -655,7 +693,8 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         title="Sci-Fi movies"
         fetchPage={fetchSciFiMovies}
         resetKey={`genre-878-${selectedPlatform}`}
-        fallbackItems={movieFallbacks}
+        fallbackItems={sciFiFallbacks}
+        mergeFallbackWithResults
         activationDelayMs={450}
         onSelect={onSelect}
         onPlay={onPlay}
@@ -668,7 +707,8 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         title="Comedy movies"
         fetchPage={fetchComedyMovies}
         resetKey={`genre-35-${selectedPlatform}`}
-        fallbackItems={movieFallbacks}
+        fallbackItems={comedyFallbacks}
+        mergeFallbackWithResults
         activationDelayMs={550}
         onSelect={onSelect}
         onPlay={onPlay}
@@ -681,7 +721,7 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         title="Horror movies"
         fetchPage={fetchHorrorMovies}
         resetKey={`genre-27-${selectedPlatform}`}
-        fallbackItems={movieFallbacks}
+        fallbackItems={horrorFallbacks}
         activationDelayMs={650}
         onSelect={onSelect}
         onPlay={onPlay}
@@ -694,7 +734,8 @@ export const TrendingAndNewSection: React.FC<TrendingAndNewSectionProps> = ({
         title="Animation movies"
         fetchPage={fetchAnimationMovies}
         resetKey={`genre-16-${selectedPlatform}`}
-        fallbackItems={movieFallbacks}
+        fallbackItems={animationFallbacks}
+        mergeFallbackWithResults
         activationDelayMs={750}
         onSelect={onSelect}
         onPlay={onPlay}

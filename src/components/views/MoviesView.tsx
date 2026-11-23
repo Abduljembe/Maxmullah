@@ -20,6 +20,7 @@ import {
   MOVIE_GENRES_LIST,
   MovieFeedType,
   TMDB_WATCH_PROVIDER_IDS,
+  mediaMatchesGenreId,
 } from '../../services/tmdbService';
 
 export type MoviesViewFeed = MovieFeedType | 'all_feeds' | 'vixsrc';
@@ -157,41 +158,67 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
       }
 
       try {
+        const filterLocalCatalog = () =>
+          fallbackMoviesRef.current.filter((m) => {
+            if (m.type !== 'movie') return false;
+            if (selectedGenreId > 0 && !mediaMatchesGenreId(m, selectedGenreId)) {
+              return false;
+            }
+            if (debouncedQuery && !m.title.toLowerCase().includes(debouncedQuery.toLowerCase())) {
+              return false;
+            }
+            if (selectedPlatform !== 'ALL' && !m.platforms.includes(selectedPlatform)) {
+              return false;
+            }
+            return true;
+          });
+
+        const applyGenreFilterIfNeeded = (list: MediaItem[]) =>
+          selectedGenreId > 0 && debouncedQuery
+            ? list.filter((m) => mediaMatchesGenreId(m, selectedGenreId))
+            : list;
+
         if (!append && pageToLoad === 1) {
           // Load pages 1 & 2 immediately so every category starts richly populated
           const [res1, res2] = await Promise.all([
             fetchBatchForPage(1),
             fetchBatchForPage(2),
           ]);
-          const combined = deduplicateMedia([...(res1.items || []), ...(res2.items || [])]);
+          const liveCombined = applyGenreFilterIfNeeded(
+            deduplicateMedia([...(res1.items || []), ...(res2.items || [])])
+          );
+          const localFiltered = filterLocalCatalog();
+          const shouldMergeLocal =
+            selectedGenreId > 0 && activeFeed !== 'vixsrc' && !debouncedQuery;
+          const combined =
+            liveCombined.length > 0
+              ? shouldMergeLocal
+                ? deduplicateMedia([...liveCombined, ...localFiltered])
+                : liveCombined
+              : localFiltered;
+
           if (combined.length > 0) {
-            const maxTotal = Math.max(1, res1.totalPages || 1, res2.totalPages || 1);
-            const loadedPage = res2.items.length > 0 ? 2 : 1;
+            const maxTotal =
+              liveCombined.length > 0
+                ? Math.max(1, res1.totalPages || 1, res2.totalPages || 1)
+                : 1;
+            const loadedPage = liveCombined.length > 0 && res2.items.length > 0 ? 2 : 1;
             setServerMovies(combined);
             pageRef.current = loadedPage;
             totalPagesRef.current = maxTotal;
-            setHasMorePages(loadedPage < maxTotal);
+            setHasMorePages(liveCombined.length > 0 && loadedPage < maxTotal);
           } else {
-            const localFiltered = fallbackMoviesRef.current.filter((m) => {
-              if (m.type !== 'movie') return false;
-              if (debouncedQuery && !m.title.toLowerCase().includes(debouncedQuery.toLowerCase())) {
-                return false;
-              }
-              if (selectedPlatform !== 'ALL' && !m.platforms.includes(selectedPlatform)) {
-                return false;
-              }
-              return true;
-            });
-            setServerMovies(localFiltered);
+            setServerMovies([]);
             setHasMorePages(false);
           }
         } else {
           const result = await fetchBatchForPage(pageToLoad);
           pageRef.current = pageToLoad;
           totalPagesRef.current = Math.max(pageToLoad, result.totalPages || totalPagesRef.current);
-          if (result.items.length > 0) {
+          const filteredItems = applyGenreFilterIfNeeded(result.items);
+          if (filteredItems.length > 0) {
             emptyStreakRef.current = 0;
-            setServerMovies((prev) => deduplicateMedia([...prev, ...result.items]));
+            setServerMovies((prev) => deduplicateMedia([...prev, ...filteredItems]));
             setHasMorePages(pageToLoad < totalPagesRef.current);
           } else {
             emptyStreakRef.current += 1;
@@ -201,7 +228,16 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
       } catch (err) {
         console.warn('MoviesView loadMovies error:', err);
         if (!append) {
-          setServerMovies(fallbackMoviesRef.current.filter((m) => m.type === 'movie'));
+          const localFallback = fallbackMoviesRef.current.filter((m) => {
+            if (m.type !== 'movie') return false;
+            if (selectedGenreId > 0 && !mediaMatchesGenreId(m, selectedGenreId)) return false;
+            if (debouncedQuery && !m.title.toLowerCase().includes(debouncedQuery.toLowerCase())) {
+              return false;
+            }
+            if (selectedPlatform !== 'ALL' && !m.platforms.includes(selectedPlatform)) return false;
+            return true;
+          });
+          setServerMovies(localFallback);
         }
         setHasMorePages(false);
       } finally {
@@ -210,7 +246,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
         isFetchingMoreRef.current = false;
       }
     },
-    [fetchBatchForPage, debouncedQuery, selectedPlatform]
+    [fetchBatchForPage, activeFeed, debouncedQuery, selectedGenreId, selectedPlatform]
   );
 
   useEffect(() => {
