@@ -22,6 +22,9 @@ import { MediaItem, StreamingPlatform } from './types';
 import { MEDIA_CATALOG } from './data/mediaData';
 import { ProfileProvider, useProfile } from './context/ProfileContext';
 import { OfflineProvider, useOffline } from './context/OfflineContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { LandingPage } from './components/landing/LandingPage';
 import { TopBar } from './components/navigation/TopBar';
 import { OfflineBanner } from './components/pwa/OfflineBanner';
 import { HeroSpotlight } from './components/hero/HeroSpotlight';
@@ -30,6 +33,7 @@ import { MediaDetailModal } from './components/modals/MediaDetailModal';
 import { VideoPlayerModal } from './components/player/VideoPlayerModal';
 import { DownloadModal } from './components/modals/DownloadModal';
 import { ProfileModal } from './components/modals/ProfileModal';
+import { AuthModal } from './components/modals/AuthModal';
 import { VibeMatcherModal } from './components/modals/VibeMatcherModal';
 import { SeriesEpisodePickerModal } from './components/modals/SeriesEpisodePickerModal';
 import { SearchDrawer } from './components/search/SearchDrawer';
@@ -125,6 +129,7 @@ function MainAppContent() {
   } | null>(null);
 
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [showVibeMatcher, setShowVibeMatcher] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [downloadToast, setDownloadToast] = useState<string | null>(null);
@@ -364,6 +369,7 @@ function MainAppContent() {
           setCurrentTab(tab);
         }}
         onOpenProfile={() => setShowProfileModal(true)}
+        onOpenAuth={() => setShowAuthModal(true)}
         onOpenVibeMatcher={() => setShowVibeMatcher(true)}
         onToggleSearch={() => setShowSearch(true)}
       />
@@ -637,8 +643,17 @@ function MainAppContent() {
 
       {/* 5. Profile Management & Switcher Modal */}
       {showProfileModal && (
-        <ProfileModal onClose={() => setShowProfileModal(false)} />
+        <ProfileModal
+          onClose={() => setShowProfileModal(false)}
+          onOpenAuth={() => {
+            setShowProfileModal(false);
+            setShowAuthModal(true);
+          }}
+        />
       )}
+
+      {/* 5b. Authentication Modal (Login / Sign Up / Verification) */}
+      {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} />}
 
       {/* 6. Vibe & Mood Matcher Modal */}
       {showVibeMatcher && (
@@ -679,12 +694,66 @@ function MainAppContent() {
   );
 }
 
+function AppEntryGate() {
+  const { user, isAuthReady, isEmailVerified } = useAuth();
+  const [allowGuestPreview, setAllowGuestPreview] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('mullahmax_guest_preview') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const wasSignedInRef = React.useRef(false);
+
+  useEffect(() => {
+    if (user && isEmailVerified) {
+      wasSignedInRef.current = true;
+    } else if (wasSignedInRef.current && !user) {
+      wasSignedInRef.current = false;
+      setAllowGuestPreview(false);
+    }
+  }, [user, isEmailVerified]);
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-[#080A0F] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="text-2xl font-black tracking-tight font-display">
+            <span className="text-white">MULLAH</span>
+            <span className="text-rose-600">MAX</span>
+          </div>
+          <RefreshCw className="w-5 h-5 text-rose-500 animate-spin" />
+        </div>
+      </div>
+    );
+  }
+
+  if ((!user || !isEmailVerified) && !allowGuestPreview) {
+    return (
+      <LandingPage
+        onContinueAsGuest={() => {
+          try {
+            sessionStorage.setItem('mullahmax_guest_preview', '1');
+          } catch {}
+          setAllowGuestPreview(true);
+        }}
+      />
+    );
+  }
+
+  return <MainAppContent />;
+}
+
 export default function App() {
   return (
-    <OfflineProvider>
-      <ProfileProvider>
-        <MainAppContent />
-      </ProfileProvider>
-    </OfflineProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <OfflineProvider>
+          <ProfileProvider>
+            <AppEntryGate />
+          </ProfileProvider>
+        </OfflineProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

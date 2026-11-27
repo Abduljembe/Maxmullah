@@ -4,14 +4,17 @@ import {
   Search,
   Menu,
   X,
+  LogIn,
 } from 'lucide-react';
 import { useProfile } from '../../context/ProfileContext';
 import { useOffline } from '../../context/OfflineContext';
+import { useAuth } from '../../context/AuthContext';
 
 interface TopBarProps {
   currentTab: 'home' | 'movies' | 'series' | 'networks' | 'downloads';
   onSelectTab: (tab: 'home' | 'movies' | 'series' | 'networks' | 'downloads') => void;
   onOpenProfile: () => void;
+  onOpenAuth: () => void;
   onOpenVibeMatcher?: () => void;
   onToggleSearch: () => void;
 }
@@ -20,10 +23,12 @@ export const TopBar: React.FC<TopBarProps> = ({
   currentTab,
   onSelectTab,
   onOpenProfile,
+  onOpenAuth,
   onToggleSearch,
 }) => {
   const { currentProfile } = useProfile();
   const { downloads } = useOffline();
+  const { user, isEmailVerified } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const completedDownloadsCount = downloads.filter((d) => d.status === 'completed').length;
@@ -99,8 +104,8 @@ export const TopBar: React.FC<TopBarProps> = ({
           </button>
         </nav>
 
-        {/* Zone 3: Search & Profile */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Zone 3: Search, Auth & Profile */}
+        <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
           <button
             onClick={onToggleSearch}
             className="p-2 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
@@ -110,18 +115,39 @@ export const TopBar: React.FC<TopBarProps> = ({
             <Search className="w-4 h-4" />
           </button>
 
+          {!user && (
+            <button
+              onClick={onOpenAuth}
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-colors cursor-pointer shadow-md"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Sign In</span>
+            </button>
+          )}
+
           <button
             onClick={onOpenProfile}
-            className="flex items-center gap-2 p-1 pl-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 transition-all cursor-pointer group"
-            title={`Profile: ${currentProfile.name}`}
+            className="flex items-center gap-2 p-1 pl-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 transition-all cursor-pointer group relative"
+            title={
+              user
+                ? `Account: ${user.email || 'Signed In'} · Profile: ${currentProfile.name}`
+                : `Profile: ${currentProfile.name}`
+            }
           >
-            <span className="text-xs font-semibold text-slate-200 hidden lg:inline max-w-[80px] truncate">
+            <span className="text-xs font-semibold text-slate-200 hidden lg:inline max-w-[90px] truncate">
               {currentProfile.name}
             </span>
             <div
-              className={`w-7 h-7 rounded-lg bg-gradient-to-br ${currentProfile.avatarColor} flex items-center justify-center text-white text-xs font-bold font-display shadow-sm group-hover:scale-105 transition-transform`}
+              className={`w-7 h-7 rounded-lg bg-gradient-to-br ${currentProfile.avatarColor} flex items-center justify-center text-white text-xs font-bold font-display shadow-sm group-hover:scale-105 transition-transform relative`}
             >
               {currentProfile.avatar}
+              {user && (
+                <span
+                  className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ring-2 ring-[#080A0F] ${
+                    isEmailVerified ? 'bg-emerald-400' : 'bg-amber-400'
+                  }`}
+                />
+              )}
             </div>
           </button>
 
@@ -201,6 +227,19 @@ export const TopBar: React.FC<TopBarProps> = ({
                 {completedDownloadsCount}
               </span>
             </button>
+
+            {!user && (
+              <button
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  onOpenAuth();
+                }}
+                className="p-2.5 rounded-xl text-left col-span-2 bg-rose-600 text-white font-bold flex items-center gap-2"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Sign In / Create Account</span>
+              </button>
+            )}
           </div>
         </div>
       )}

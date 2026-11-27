@@ -1,0 +1,152 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "User Account",
+      "description": "Private authenticated account root containing account metadata and active profile pointer.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID owning this account."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 200,
+          "description": "Verified account email address."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Account holder display name."
+        },
+        "activeProfileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Currently selected viewer profile ID."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when account record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when account record was last updated."
+        }
+      },
+      "required": ["uid", "email", "displayName", "activeProfileId", "createdAt", "updatedAt"]
+    },
+    "ViewerProfile": {
+      "title": "Viewer Profile",
+      "description": "Individual viewer profile nested under a user account with independent watchlist, ratings, and watch history.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique profile document identifier."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the parent account owner."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Viewer profile display name."
+        },
+        "avatar": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8,
+          "description": "Short avatar letter or glyph."
+        },
+        "avatarColor": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 80,
+          "description": "Tailwind gradient class for the profile avatar."
+        },
+        "isKids": {
+          "type": "boolean",
+          "description": "Whether this profile is a Kids-focused profile."
+        },
+        "favoriteGenres": {
+          "type": "array",
+          "description": "Bounded list of up to 20 preferred genres."
+        },
+        "preferredPlatforms": {
+          "type": "array",
+          "description": "Bounded list of up to 15 preferred streaming services."
+        },
+        "watchlist": {
+          "type": "array",
+          "description": "Bounded list of up to 500 saved media IDs."
+        },
+        "liked": {
+          "type": "array",
+          "description": "Bounded list of up to 500 liked media IDs."
+        },
+        "disliked": {
+          "type": "array",
+          "description": "Bounded list of up to 500 disliked media IDs."
+        },
+        "watchHistory": {
+          "type": "array",
+          "description": "Bounded list of up to 200 watch progress records."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "name",
+        "avatar",
+        "avatarColor",
+        "isKids",
+        "favoriteGenres",
+        "preferredPlatforms",
+        "watchlist",
+        "liked",
+        "disliked",
+        "watchHistory",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Private user account documents indexed by Firebase Auth UID."
+    },
+    "/users/{userId}/profiles/{profileId}": {
+      "schema": { "$ref": "#/entities/ViewerProfile" },
+      "description": "Subcollection of viewer profiles belonging to a user account."
+    }
+  }
+}

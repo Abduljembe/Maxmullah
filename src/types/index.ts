@@ -96,6 +96,7 @@ export interface UserProfile {
   name: string;
   avatar: string;
   avatarColor: string;
+  isKids?: boolean;
   favoriteGenres: string[];
   preferredPlatforms: StreamingPlatform[];
   watchlist: string[]; // media item ids
