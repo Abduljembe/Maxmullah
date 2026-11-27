@@ -3,6 +3,8 @@ import {
   User,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   updateProfile,
@@ -17,6 +19,7 @@ interface AuthContextType {
   isAuthReady: boolean;
   isEmailVerified: boolean;
   signInWithGoogle: () => Promise<void>;
+  signInWithGoogleRedirect: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   signUpWithEmail: (email: string, password: string, displayName: string) => Promise<void>;
   resendVerificationEmail: () => Promise<void>;
@@ -32,6 +35,7 @@ function mapFirebaseAuthError(err: unknown): string {
     typeof err === 'object' && err !== null && 'code' in err
       ? String((err as { code?: unknown }).code || '')
       : '';
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
 
   switch (code) {
     case 'auth/invalid-credential':
@@ -45,14 +49,24 @@ function mapFirebaseAuthError(err: unknown): string {
     case 'auth/invalid-email':
       return 'Please enter a valid email address.';
     case 'auth/popup-closed-by-user':
-      return 'Sign-in popup was closed before completing.';
+      return 'Google sign-in popup was closed before completing. Try again or allow popups for this site.';
+    case 'auth/cancelled-popup-request':
+      return 'Another sign-in popup was already open. Please try again.';
     case 'auth/popup-blocked':
-      return 'Sign-in popup was blocked by your browser. Please allow popups and try again.';
+      return 'Sign-in popup was blocked by your browser. Allow popups for this site or use Redirect Sign-In.';
+    case 'auth/unauthorized-domain':
+      return `Domain "${hostname}" is not authorized in Firebase Auth. Add "${hostname}" under Firebase Console → Authentication → Settings → Authorized domains.`;
+    case 'auth/account-exists-with-different-credential':
+      return 'An account with this email already exists with a different sign-in provider.';
+    case 'auth/network-request-failed':
+      return 'Network request failed. Please check your connection and try again.';
+    case 'auth/user-disabled':
+      return 'This account has been disabled.';
     case 'auth/too-many-requests':
       return 'Too many attempts. Please wait a moment before trying again.';
     case 'auth/operation-not-allowed':
     case 'auth/configuration-not-found':
-      return 'Email/Password sign-in is not enabled in the Firebase Console yet. Use Continue with Google, or enable Email/Password under Authentication → Sign-in method.';
+      return 'Email/Password sign-in is not enabled in Firebase Console yet. Use Continue with Google, or enable Email/Password under Authentication → Sign-in method.';
     default:
       return err instanceof Error ? err.message : 'Authentication failed. Please try again.';
   }
@@ -60,11 +74,17 @@ function mapFirebaseAuthError(err: unknown): string {
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [isEmailVerified, setIsEmailVerified] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   useEffect(() => {
+    void getRedirectResult(auth).catch((err) => {
+      console.warn('Google redirect sign-in notice:', err);
+    });
+
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
+      setIsEmailVerified(Boolean(firebaseUser?.emailVerified));
       setIsAuthReady(true);
     });
     return () => unsubscribe();
@@ -72,7 +92,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithGoogle = async () => {
     try {
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
       await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      throw new Error(mapFirebaseAuthError(err));
+    }
+  };
+
+  const signInWithGoogleRedirect = async () => {
+    try {
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithRedirect(auth, googleProvider);
     } catch (err) {
       throw new Error(mapFirebaseAuthError(err));
     }
@@ -93,8 +123,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (cleanName) {
         await updateProfile(cred.user, { displayName: cleanName });
       }
-      await sendEmailVerification(cred.user);
-      setUser({ ...cred.user } as User);
+      try {
+        await sendEmailVerification(cred.user);
+      } catch (verifyErr) {
+        console.warn('Could not send verification email immediately:', verifyErr);
+      }
+      setUser(cred.user);
+      setIsEmailVerified(Boolean(cred.user.emailVerified));
     } catch (err) {
       throw new Error(mapFirebaseAuthError(err));
     }
@@ -113,8 +148,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!auth.currentUser) return false;
     try {
       await auth.currentUser.reload();
+      await auth.currentUser.getIdToken(true);
       const verified = Boolean(auth.currentUser.emailVerified);
-      setUser(auth.currentUser ? ({ ...auth.currentUser } as User) : null);
+      setUser(auth.currentUser);
+      setIsEmailVerified(verified);
       return verified;
     } catch (err) {
       throw new Error(mapFirebaseAuthError(err));
@@ -141,8 +178,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         user,
         isAuthReady,
-        isEmailVerified: Boolean(user?.emailVerified),
+        isEmailVerified,
         signInWithGoogle,
+        signInWithGoogleRedirect,
         signInWithEmail,
         signUpWithEmail,
         resendVerificationEmail,

@@ -22,10 +22,8 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isVerifiedOwner(userId) {
-      return isSignedIn()
-        && request.auth.uid == userId
-        && request.auth.token.email_verified == true;
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
     }
 
     function isValidUserAccount(data, userId) {
@@ -73,17 +71,17 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isValidId(userId) && isVerifiedOwner(userId);
+      allow get: if isValidId(userId) && isOwner(userId);
       allow list: if false;
 
       allow create: if isValidId(userId)
-        && isVerifiedOwner(userId)
+        && isOwner(userId)
         && isValidUserAccount(incoming(), userId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
       allow update: if isValidId(userId)
-        && isVerifiedOwner(userId)
+        && isOwner(userId)
         && isValidUserAccount(incoming(), userId)
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
@@ -94,20 +92,20 @@ service cloud.firestore {
           || incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'activeProfileId', 'updatedAt'])
         );
 
-      allow delete: if isValidId(userId) && isVerifiedOwner(userId);
+      allow delete: if isValidId(userId) && isOwner(userId);
 
       match /profiles/{profileId} {
         allow get: if isValidId(userId)
           && isValidId(profileId)
-          && isVerifiedOwner(userId)
+          && isOwner(userId)
           && exists(/databases/$(database)/documents/users/$(userId));
 
-        allow list: if isVerifiedOwner(userId)
+        allow list: if isOwner(userId)
           && resource.data.ownerId == request.auth.uid;
 
         allow create: if isValidId(userId)
           && isValidId(profileId)
-          && isVerifiedOwner(userId)
+          && isOwner(userId)
           && isValidViewerProfile(incoming(), userId, profileId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
@@ -118,7 +116,7 @@ service cloud.firestore {
 
         allow update: if isValidId(userId)
           && isValidId(profileId)
-          && isVerifiedOwner(userId)
+          && isOwner(userId)
           && isValidViewerProfile(incoming(), userId, profileId)
           && incoming().id == existing().id
           && incoming().ownerId == existing().ownerId
@@ -134,7 +132,7 @@ service cloud.firestore {
 
         allow delete: if isValidId(userId)
           && isValidId(profileId)
-          && isVerifiedOwner(userId)
+          && isOwner(userId)
           && exists(/databases/$(database)/documents/users/$(userId));
       }
     }

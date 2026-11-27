@@ -218,15 +218,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ onClose, onOpenAuth 
                   <span className="text-sm font-bold text-white truncate">
                     {user.displayName || user.email || 'Account'}
                   </span>
-                  {isEmailVerified ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-300">
-                      <Cloud className="w-3 h-3" />
-                      {isCloudSynced ? 'Cloud Synced' : 'Account Active'}
-                    </span>
-                  ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-300">
+                    <Cloud className="w-3 h-3" />
+                    {isCloudSynced ? 'Cloud Synced' : 'Account Active'}
+                  </span>
+                  {!isEmailVerified && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-[10px] font-bold text-amber-300">
-                      <AlertCircle className="w-3 h-3" />
-                      Verify Email to Sync
+                      Unverified Email
                     </span>
                   )}
                 </div>

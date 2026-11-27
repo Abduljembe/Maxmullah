@@ -26,6 +26,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     user,
     isEmailVerified,
     signInWithGoogle,
+    signInWithGoogleRedirect,
     signInWithEmail,
     signUpWithEmail,
     resendVerificationEmail,
@@ -40,6 +41,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showRedirectFallback, setShowRedirectFallback] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
 
@@ -51,8 +53,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       await signInWithGoogle();
       onClose();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Google sign-in failed.');
+      const msg = err instanceof Error ? err.message : 'Google sign-in failed.';
+      setErrorMsg(msg);
+      if (msg.toLowerCase().includes('popup')) {
+        setShowRedirectFallback(true);
+      }
     } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGoogleRedirect = async () => {
+    setErrorMsg('');
+    setIsSubmitting(true);
+    try {
+      await signInWithGoogleRedirect();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Google redirect sign-in failed.');
       setIsSubmitting(false);
     }
   };
@@ -68,7 +85,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setStatusMsg('Password reset link sent to your email.');
       } else if (mode === 'signup') {
         await signUpWithEmail(email, password, displayName);
-        setStatusMsg('Account created! Please check your inbox and verify your email to sync profiles.');
+        onClose();
       } else {
         await signInWithEmail(email, password);
         onClose();
@@ -270,6 +287,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </svg>
               <span>Continue with Google</span>
             </button>
+
+            {showRedirectFallback && (
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleGoogleRedirect}
+                className="w-full py-2 px-4 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Popup blocked? Sign in with Google Redirect instead
+              </button>
+            )}
 
             <div className="flex items-center gap-3 text-[11px] text-slate-500">
               <div className="flex-1 h-px bg-white/10" />

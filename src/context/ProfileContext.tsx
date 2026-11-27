@@ -103,8 +103,8 @@ function sanitizeWatchHistory(
 const ProfileContext = createContext<ProfileContextType | undefined>(undefined);
 
 export const ProfileProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, isAuthReady, isEmailVerified } = useAuth();
-  const canUseCloud = Boolean(isAuthReady && user && isEmailVerified);
+  const { user, isAuthReady } = useAuth();
+  const canUseCloud = Boolean(isAuthReady && user);
 
   const [guestProfiles, setGuestProfiles] = useState<UserProfile[]>(() => {
     try {
@@ -289,6 +289,7 @@ export const ProfileProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const switchProfile = async (profileId: string) => {
     if (!profiles.some((p) => p.id === profileId)) return;
     if (canUseCloud && user) {
+      if (cloudProfiles.length === 0) return;
       setCloudActiveProfileId(profileId);
       const path = `users/${user.uid}`;
       try {
@@ -453,6 +454,7 @@ export const ProfileProvider: React.FC<{ children: React.ReactNode }> = ({ child
     );
 
     if (canUseCloud && user) {
+      if (cloudProfiles.length === 0) return;
       const targetPath = `users/${user.uid}/profiles/${currentProfile.id}`;
       try {
         await updateDoc(doc(db, 'users', user.uid, 'profiles', currentProfile.id), {
@@ -485,6 +487,7 @@ export const ProfileProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const boundedDisliked = sanitizeStringArray(disliked, 500);
 
     if (canUseCloud && user) {
+      if (cloudProfiles.length === 0) return;
       const targetPath = `users/${user.uid}/profiles/${currentProfile.id}`;
       try {
         await updateDoc(doc(db, 'users', user.uid, 'profiles', currentProfile.id), {
@@ -531,6 +534,7 @@ export const ProfileProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const boundedHistory = sanitizeWatchHistory(history);
 
     if (canUseCloud && user) {
+      if (cloudProfiles.length === 0) return;
       const targetPath = `users/${user.uid}/profiles/${currentProfile.id}`;
       try {
         await setDoc(

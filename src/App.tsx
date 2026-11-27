@@ -695,7 +695,7 @@ function MainAppContent() {
 }
 
 function AppEntryGate() {
-  const { user, isAuthReady, isEmailVerified } = useAuth();
+  const { user, isAuthReady } = useAuth();
   const [allowGuestPreview, setAllowGuestPreview] = useState<boolean>(() => {
     try {
       return sessionStorage.getItem('mullahmax_guest_preview') === '1';
@@ -706,13 +706,13 @@ function AppEntryGate() {
   const wasSignedInRef = React.useRef(false);
 
   useEffect(() => {
-    if (user && isEmailVerified) {
+    if (user) {
       wasSignedInRef.current = true;
     } else if (wasSignedInRef.current && !user) {
       wasSignedInRef.current = false;
       setAllowGuestPreview(false);
     }
-  }, [user, isEmailVerified]);
+  }, [user]);
 
   if (!isAuthReady) {
     return (
@@ -728,7 +728,7 @@ function AppEntryGate() {
     );
   }
 
-  if ((!user || !isEmailVerified) && !allowGuestPreview) {
+  if (!user && !allowGuestPreview) {
     return (
       <LandingPage
         onContinueAsGuest={() => {

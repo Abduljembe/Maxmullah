@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Mail,
   Lock,
@@ -8,13 +8,17 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
-  RefreshCw,
   ArrowRight,
   Film,
+  Tv,
   Users,
   HardDrive,
+  Play,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { MEDIA_CATALOG } from '../../data/mediaData';
+import { fetchLiveTrending } from '../../services/tmdbService';
+import { MediaItem } from '../../types';
 import heroCinemaImg from '../../assets/images/hero_cinema_lounge_1795748328270.jpg';
 import showcaseProfilesImg from '../../assets/images/showcase_multi_profile_1795748330570.jpg';
 import showcaseOfflineImg from '../../assets/images/showcase_offline_travel_1795748328565.jpg';
@@ -23,17 +27,18 @@ interface LandingPageProps {
   onContinueAsGuest: () => void;
 }
 
+function isSafeCinemaImageUrl(url: string | undefined): url is string {
+  if (!url) return false;
+  return !url.includes('unsplash.com') && !url.includes('placeholder.com');
+}
+
 export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) => {
   const {
-    user,
-    isEmailVerified,
     signInWithGoogle,
+    signInWithGoogleRedirect,
     signInWithEmail,
     signUpWithEmail,
-    resendVerificationEmail,
-    refreshUserSession,
     sendPasswordReset,
-    logout,
   } = useAuth();
 
   const [mode, setMode] = useState<'login' | 'signup' | 'reset'>('login');
@@ -42,20 +47,109 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showRedirectFallback, setShowRedirectFallback] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
+  const [selectedTitlePrompt, setSelectedTitlePrompt] = useState<string | null>(null);
 
-  const [heroImgFailed, setHeroImgFailed] = useState(false);
+  const [liveItems, setLiveItems] = useState<MediaItem[]>([]);
+  const [heroSlideIndex, setHeroSlideIndex] = useState(0);
+  const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
   const [profilesImgFailed, setProfilesImgFailed] = useState(false);
   const [offlineImgFailed, setOfflineImgFailed] = useState(false);
 
   const authCardRef = useRef<HTMLDivElement>(null);
   const emailInputRef = useRef<HTMLInputElement>(null);
 
-  const focusAuthMode = (nextMode: 'login' | 'signup') => {
+  useEffect(() => {
+    let active = true;
+    fetchLiveTrending('all')
+      .then((items) => {
+        if (active && Array.isArray(items) && items.length > 0) {
+          setLiveItems(items);
+        }
+      })
+      .catch(() => {
+        // Keep curated catalog banners when offline
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const showcaseItems = useMemo(() => {
+    const merged = new Map<string, MediaItem>();
+    for (const item of MEDIA_CATALOG) {
+      merged.set(item.id, item);
+    }
+    for (const item of liveItems) {
+      if (!merged.has(item.id)) {
+        merged.set(item.id, item);
+      }
+    }
+    return Array.from(merged.values());
+  }, [liveItems]);
+
+  const widescreenBanners = useMemo(() => {
+    const withBackdrop = showcaseItems.filter((item) => isSafeCinemaImageUrl(item.backdropUrl));
+    const movies = withBackdrop.filter((item) => item.type === 'movie').slice(0, 4);
+    const series = withBackdrop.filter((item) => item.type === 'series').slice(0, 2);
+    const combined = [...movies, ...series];
+    if (combined.length < 6) {
+      for (const item of withBackdrop) {
+        if (!combined.some((c) => c.id === item.id)) {
+          combined.push(item);
+        }
+        if (combined.length >= 6) break;
+      }
+    }
+    return combined;
+  }, [showcaseItems]);
+
+  const posterLineup = useMemo(() => {
+    const withPoster = showcaseItems.filter((item) => isSafeCinemaImageUrl(item.posterUrl));
+    const seriesFirst = withPoster.filter((item) => item.type === 'series').slice(0, 5);
+    const movies = withPoster.filter((item) => item.type === 'movie').slice(0, 5);
+    return [...seriesFirst, ...movies].slice(0, 10);
+  }, [showcaseItems]);
+
+  const heroSlides = useMemo(() => {
+    const slides = widescreenBanners.slice(0, 4).map((item) => ({
+      id: item.id,
+      src: item.backdropUrl,
+      title: item.title,
+      meta: `${item.type === 'series' ? 'Series' : 'Film'} · ${item.year}`,
+    }));
+    return [
+      ...slides,
+      {
+        id: 'cinema-lounge',
+        src: heroCinemaImg,
+        title: 'Private Screening Room',
+        meta: 'MullahMax 1080p HD',
+      },
+    ];
+  }, [widescreenBanners]);
+
+  useEffect(() => {
+    if (heroSlides.length <= 1) return;
+    const timer = window.setInterval(() => {
+      setHeroSlideIndex((prev) => (prev + 1) % heroSlides.length);
+    }, 6500);
+    return () => window.clearInterval(timer);
+  }, [heroSlides.length]);
+
+  const activeSlide = heroSlides[heroSlideIndex % heroSlides.length] || heroSlides[0];
+  const heroBgSrc =
+    activeSlide && !failedImages[`hero-${activeSlide.id}`] ? activeSlide.src : heroCinemaImg;
+
+  const focusAuthMode = (nextMode: 'login' | 'signup', titleForPrompt?: string) => {
     setMode(nextMode);
     setErrorMsg('');
     setStatusMsg('');
+    if (titleForPrompt) {
+      setSelectedTitlePrompt(titleForPrompt);
+    }
     authCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setTimeout(() => {
       emailInputRef.current?.focus();
@@ -69,8 +163,24 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
     try {
       await signInWithGoogle();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Google sign-in failed.');
+      const msg = err instanceof Error ? err.message : 'Google sign-in failed.';
+      setErrorMsg(msg);
+      if (msg.toLowerCase().includes('popup') || msg.toLowerCase().includes('redirect')) {
+        setShowRedirectFallback(true);
+      }
     } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGoogleRedirect = async () => {
+    setErrorMsg('');
+    setStatusMsg('');
+    setIsSubmitting(true);
+    try {
+      await signInWithGoogleRedirect();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Google redirect sign-in failed.');
       setIsSubmitting(false);
     }
   };
@@ -86,46 +196,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
         setStatusMsg('Password reset link sent. Check your inbox to choose a new password.');
       } else if (mode === 'signup') {
         await signUpWithEmail(email, password, displayName);
-        setStatusMsg(
-          'Account created. Check your inbox and verify your email to sync your profiles.'
-        );
       } else {
         await signInWithEmail(email, password);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Authentication failed.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleVerifyCheck = async () => {
-    setErrorMsg('');
-    setStatusMsg('');
-    setIsSubmitting(true);
-    try {
-      const verified = await refreshUserSession();
-      if (!verified) {
-        setStatusMsg(
-          'Email is not verified yet. Open the verification link in your inbox, then check again.'
-        );
-      }
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to check verification.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleResend = async () => {
-    setErrorMsg('');
-    setStatusMsg('');
-    setIsSubmitting(true);
-    try {
-      await resendVerificationEmail();
-      setStatusMsg('Verification email resent. Check your inbox and spam folder.');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to resend verification email.');
     } finally {
       setIsSubmitting(false);
     }
@@ -146,6 +221,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
 
           <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-300">
             <a
+              href="#banners"
+              className="whitespace-nowrap shrink-0 hover:text-white hover:underline underline-offset-4 transition-colors"
+            >
+              Movies &amp; Series
+            </a>
+            <a
               href="#capabilities"
               className="whitespace-nowrap shrink-0 hover:text-white hover:underline underline-offset-4 transition-colors"
             >
@@ -163,12 +244,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
             >
               Offline Vault
             </a>
-            <a
-              href="#access"
-              className="whitespace-nowrap shrink-0 hover:text-white hover:underline underline-offset-4 transition-colors"
-            >
-              Account
-            </a>
           </nav>
 
           <div className="flex items-center gap-3 shrink-0">
@@ -184,27 +259,34 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
       </header>
 
       <main id="top" className="flex-1">
-        {/* Hero Split with Full-Bleed Cinema Backdrop & Sign In / Sign Up Panel */}
+        {/* Hero Split with Rotating Cinema Banner Backdrop & Sign In / Sign Up Panel */}
         <section id="access" className="relative overflow-hidden border-b border-white/10">
           <div className="absolute inset-0">
-            {!heroImgFailed ? (
+            {!failedImages['hero-fallback'] ? (
               <img
-                src={heroCinemaImg}
-                alt="Private architectural screening room with projector beam"
+                key={activeSlide?.id}
+                src={heroBgSrc}
+                alt={activeSlide?.title || 'Cinema backdrop'}
                 referrerPolicy="no-referrer"
-                onError={() => setHeroImgFailed(true)}
-                className="w-full h-full object-cover object-center opacity-55"
+                onError={() => {
+                  if (activeSlide && heroBgSrc !== heroCinemaImg) {
+                    setFailedImages((prev) => ({ ...prev, [`hero-${activeSlide.id}`]: true }));
+                  } else {
+                    setFailedImages((prev) => ({ ...prev, 'hero-fallback': true }));
+                  }
+                }}
+                className="w-full h-full object-cover object-center opacity-50 transition-opacity duration-700"
               />
             ) : (
               <div className="w-full h-full bg-gradient-to-br from-[#0F1523] via-[#080A0F] to-[#170A10]" />
             )}
-            <div className="absolute inset-0 bg-gradient-to-t from-[#080A0F] via-[#080A0F]/80 to-[#080A0F]/65" />
-            <div className="absolute inset-0 bg-gradient-to-r from-[#080A0F] via-[#080A0F]/75 to-[#080A0F]/55" />
+            <div className="absolute inset-0 bg-gradient-to-t from-[#080A0F] via-[#080A0F]/80 to-[#080A0F]/55" />
+            <div className="absolute inset-0 bg-gradient-to-r from-[#080A0F] via-[#080A0F]/80 to-[#080A0F]/55" />
           </div>
 
           <div className="relative w-full px-4 sm:px-8 md:px-12 lg:px-16 max-w-[1400px] mx-auto py-12 sm:py-16 lg:py-20">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-stretch">
-              {/* Left Column: Value Proposition */}
+              {/* Left Column: Value Proposition & Live Banner Preview Strip */}
               <div className="lg:col-span-7 flex flex-col justify-between gap-8 py-2">
                 <div className="space-y-6">
                   <p className="text-xs font-semibold tracking-wide text-slate-300">
@@ -245,13 +327,31 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
                   </div>
                 </div>
 
-                {/* Unboxed Typographic Metadata Strip */}
-                <div className="pt-6 border-t border-white/10 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs sm:text-sm text-slate-400">
-                  <span>Full 1080p HD &amp; 720p playback</span>
-                  <span aria-hidden="true">·</span>
-                  <span>Multi-profile watchlists &amp; Kids mode</span>
-                  <span aria-hidden="true">·</span>
-                  <span>Real-time cloud sync</span>
+                {/* Hero Backdrop Switcher & Unboxed Metadata Strip */}
+                <div className="pt-6 border-t border-white/10 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs text-slate-300 font-medium">
+                      <span>Featured Backdrop: </span>
+                      <span className="text-white font-semibold">{activeSlide?.title}</span>
+                      <span className="text-slate-400"> · {activeSlide?.meta}</span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {heroSlides.map((slide, idx) => (
+                        <button
+                          key={slide.id}
+                          type="button"
+                          onClick={() => setHeroSlideIndex(idx)}
+                          aria-label={`Show ${slide.title} backdrop`}
+                          className={`h-1.5 rounded-full transition-all cursor-pointer ${
+                            idx === heroSlideIndex % heroSlides.length
+                              ? 'w-6 bg-rose-500'
+                              : 'w-2.5 bg-white/25 hover:bg-white/50'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -260,17 +360,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
                 <div className="w-full rounded-2xl bg-[#0E121B]/95 border border-white/12 p-6 sm:p-7 shadow-2xl flex flex-col justify-center space-y-5">
                   <div>
                     <h2 className="text-xl font-bold text-white font-display tracking-tight">
-                      {user && !isEmailVerified
-                        ? 'Verify your email address'
-                        : mode === 'signup'
-                          ? 'Create your account'
-                          : mode === 'reset'
-                            ? 'Reset your password'
-                            : 'Sign in to continue'}
+                      {mode === 'signup'
+                        ? 'Create your account'
+                        : mode === 'reset'
+                          ? 'Reset your password'
+                          : 'Sign in to continue'}
                     </h2>
                     <p className="text-xs text-slate-400 mt-1">
-                      {user && !isEmailVerified
-                        ? `Signed in as ${user.email}`
+                      {selectedTitlePrompt
+                        ? `Sign in or create a free account to stream ${selectedTitlePrompt} in 1080p HD.`
                         : 'Access your household profiles, watchlist, and playback progress.'}
                     </p>
                   </div>
@@ -289,253 +387,360 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
                     </div>
                   )}
 
-                  {user && !isEmailVerified ? (
-                    <div className="space-y-3">
-                      <p className="text-xs text-slate-300 leading-relaxed">
-                        We sent a verification link to <strong className="text-white">{user.email}</strong>. Click the link in your inbox, then refresh below to enter MullahMax.
-                      </p>
+                  {mode !== 'reset' && (
+                    <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-white/5 border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode('login');
+                          setErrorMsg('');
+                          setStatusMsg('');
+                        }}
+                        className={`py-2 px-3 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          mode === 'login'
+                            ? 'bg-white text-slate-950'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        Sign In
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode('signup');
+                          setErrorMsg('');
+                          setStatusMsg('');
+                        }}
+                        className={`py-2 px-3 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          mode === 'signup'
+                            ? 'bg-white text-slate-950'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        Sign Up
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={handleGoogleSignIn}
+                      className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-950 text-xs font-bold flex items-center justify-center gap-2.5 transition-colors cursor-pointer shadow-sm"
+                    >
+                      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          fill="#4285F4"
+                          d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                        />
+                        <path
+                          fill="#34A853"
+                          d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.37 24 12 24Z"
+                        />
+                        <path
+                          fill="#FBBC05"
+                          d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                        />
+                        <path
+                          fill="#EA4335"
+                          d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                        />
+                      </svg>
+                      <span>Continue with Google</span>
+                    </button>
+
+                    {showRedirectFallback && (
                       <button
                         type="button"
                         disabled={isSubmitting}
-                        onClick={handleVerifyCheck}
-                        className="w-full py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                        onClick={handleGoogleRedirect}
+                        className="w-full py-2 px-4 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-semibold transition-colors cursor-pointer"
                       >
-                        {isSubmitting ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <RefreshCw className="w-4 h-4" />
-                        )}
-                        <span>I Verified My Email</span>
+                        Popup blocked? Sign in with Google Redirect instead
                       </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-3 text-[11px] text-slate-500">
+                    <div className="flex-1 h-px bg-white/10" />
+                    <span>Or with email</span>
+                    <div className="flex-1 h-px bg-white/10" />
+                  </div>
+
+                  <form onSubmit={handleEmailSubmit} className="space-y-3.5">
+                    {mode === 'signup' && (
+                      <div>
+                        <label
+                          htmlFor="landing-name"
+                          className="text-xs font-semibold text-slate-300 block mb-1"
+                        >
+                          Full Name
+                        </label>
+                        <div className="relative">
+                          <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            id="landing-name"
+                            type="text"
+                            required
+                            maxLength={100}
+                            value={displayName}
+                            onChange={(e) => setDisplayName(e.target.value)}
+                            placeholder="Alex Morgan"
+                            className="w-full bg-white/5 border border-white/15 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:outline-none focus:border-rose-500"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <label
+                        htmlFor="landing-email"
+                        className="text-xs font-semibold text-slate-300 block mb-1"
+                      >
+                        Email Address
+                      </label>
+                      <div className="relative">
+                        <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          ref={emailInputRef}
+                          id="landing-email"
+                          type="email"
+                          required
+                          maxLength={200}
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          className="w-full bg-white/5 border border-white/15 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:outline-none focus:border-rose-500"
+                        />
+                      </div>
+                    </div>
+
+                    {mode !== 'reset' && (
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label
+                            htmlFor="landing-password"
+                            className="text-xs font-semibold text-slate-300"
+                          >
+                            Password
+                          </label>
+                          {mode === 'login' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMode('reset');
+                                setErrorMsg('');
+                                setStatusMsg('');
+                              }}
+                              className="text-xs text-rose-400 hover:text-rose-300 cursor-pointer"
+                            >
+                              Forgot password?
+                            </button>
+                          )}
+                        </div>
+                        <div className="relative">
+                          <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            id="landing-password"
+                            type={showPassword ? 'text' : 'password'}
+                            required
+                            minLength={6}
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="Minimum 6 characters"
+                            className="w-full bg-white/5 border border-white/15 rounded-xl pl-10 pr-10 py-2.5 text-sm text-white focus:outline-none focus:border-rose-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword((prev) => !prev)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                            aria-label={showPassword ? 'Hide password' : 'Show password'}
+                          >
+                            {showPassword ? (
+                              <EyeOff className="w-4 h-4" />
+                            ) : (
+                              <Eye className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-lg"
+                    >
+                      {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <span>
+                        {mode === 'signup'
+                          ? 'Create Account'
+                          : mode === 'reset'
+                            ? 'Send Reset Link'
+                            : 'Sign In'}
+                      </span>
+                    </button>
+
+                    {mode === 'reset' && (
                       <button
                         type="button"
-                        disabled={isSubmitting}
-                        onClick={handleResend}
-                        className="w-full py-2.5 px-4 rounded-xl bg-white/10 hover:bg-white/15 disabled:opacity-60 text-white text-xs font-semibold transition-colors cursor-pointer"
-                      >
-                        Resend Verification Email
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleGoogleSignIn}
-                        className="w-full py-2.5 px-4 rounded-xl bg-white text-slate-950 hover:bg-slate-200 text-xs font-bold transition-colors cursor-pointer"
-                      >
-                        Continue with Google Instead
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await logout();
+                        onClick={() => {
+                          setMode('login');
                           setErrorMsg('');
                           setStatusMsg('');
                         }}
                         className="w-full text-center text-xs text-slate-400 hover:text-white pt-1 cursor-pointer"
                       >
-                        Sign out and use another email
+                        Back to Sign In
                       </button>
-                    </div>
-                  ) : (
-                    <>
-                      {mode !== 'reset' && (
-                        <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-white/5 border border-white/10">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setMode('login');
-                              setErrorMsg('');
-                              setStatusMsg('');
-                            }}
-                            className={`py-2 px-3 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              mode === 'login'
-                                ? 'bg-white text-slate-950'
-                                : 'text-slate-300 hover:text-white'
-                            }`}
-                          >
-                            Sign In
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setMode('signup');
-                              setErrorMsg('');
-                              setStatusMsg('');
-                            }}
-                            className={`py-2 px-3 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              mode === 'signup'
-                                ? 'bg-white text-slate-950'
-                                : 'text-slate-300 hover:text-white'
-                            }`}
-                          >
-                            Sign Up
-                          </button>
-                        </div>
-                      )}
-
-                      <button
-                        type="button"
-                        disabled={isSubmitting}
-                        onClick={handleGoogleSignIn}
-                        className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-950 text-xs font-bold flex items-center justify-center gap-2.5 transition-colors cursor-pointer shadow-sm"
-                      >
-                        <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-                          <path
-                            fill="#4285F4"
-                            d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-                          />
-                          <path
-                            fill="#34A853"
-                            d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.37 24 12 24Z"
-                          />
-                          <path
-                            fill="#FBBC05"
-                            d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-                          />
-                          <path
-                            fill="#EA4335"
-                            d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-                          />
-                        </svg>
-                        <span>Continue with Google</span>
-                      </button>
-
-                      <div className="flex items-center gap-3 text-[11px] text-slate-500">
-                        <div className="flex-1 h-px bg-white/10" />
-                        <span>Or with email</span>
-                        <div className="flex-1 h-px bg-white/10" />
-                      </div>
-
-                      <form onSubmit={handleEmailSubmit} className="space-y-3.5">
-                        {mode === 'signup' && (
-                          <div>
-                            <label
-                              htmlFor="landing-name"
-                              className="text-xs font-semibold text-slate-300 block mb-1"
-                            >
-                              Full Name
-                            </label>
-                            <div className="relative">
-                              <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                              <input
-                                id="landing-name"
-                                type="text"
-                                required
-                                maxLength={100}
-                                value={displayName}
-                                onChange={(e) => setDisplayName(e.target.value)}
-                                placeholder="Alex Morgan"
-                                className="w-full bg-white/5 border border-white/15 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:outline-none focus:border-rose-500"
-                              />
-                            </div>
-                          </div>
-                        )}
-
-                        <div>
-                          <label
-                            htmlFor="landing-email"
-                            className="text-xs font-semibold text-slate-300 block mb-1"
-                          >
-                            Email Address
-                          </label>
-                          <div className="relative">
-                            <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                            <input
-                              ref={emailInputRef}
-                              id="landing-email"
-                              type="email"
-                              required
-                              maxLength={200}
-                              value={email}
-                              onChange={(e) => setEmail(e.target.value)}
-                              placeholder="you@example.com"
-                              className="w-full bg-white/5 border border-white/15 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:outline-none focus:border-rose-500"
-                            />
-                          </div>
-                        </div>
-
-                        {mode !== 'reset' && (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <label
-                                htmlFor="landing-password"
-                                className="text-xs font-semibold text-slate-300"
-                              >
-                                Password
-                              </label>
-                              {mode === 'login' && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setMode('reset');
-                                    setErrorMsg('');
-                                    setStatusMsg('');
-                                  }}
-                                  className="text-xs text-rose-400 hover:text-rose-300 cursor-pointer"
-                                >
-                                  Forgot password?
-                                </button>
-                              )}
-                            </div>
-                            <div className="relative">
-                              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                              <input
-                                id="landing-password"
-                                type={showPassword ? 'text' : 'password'}
-                                required
-                                minLength={6}
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Minimum 6 characters"
-                                className="w-full bg-white/5 border border-white/15 rounded-xl pl-10 pr-10 py-2.5 text-sm text-white focus:outline-none focus:border-rose-500"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => setShowPassword((prev) => !prev)}
-                                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
-                                aria-label={showPassword ? 'Hide password' : 'Show password'}
-                              >
-                                {showPassword ? (
-                                  <EyeOff className="w-4 h-4" />
-                                ) : (
-                                  <Eye className="w-4 h-4" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-
-                        <button
-                          type="submit"
-                          disabled={isSubmitting}
-                          className="w-full py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-lg"
-                        >
-                          {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                          <span>
-                            {mode === 'signup'
-                              ? 'Create Account'
-                              : mode === 'reset'
-                                ? 'Send Reset Link'
-                                : 'Sign In'}
-                          </span>
-                        </button>
-
-                        {mode === 'reset' && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setMode('login');
-                              setErrorMsg('');
-                              setStatusMsg('');
-                            }}
-                            className="w-full text-center text-xs text-slate-400 hover:text-white pt-1 cursor-pointer"
-                          >
-                            Back to Sign In
-                          </button>
-                        )}
-                      </form>
-                    </>
-                  )}
+                    )}
+                  </form>
                 </div>
               </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Widescreen Movie & Series Banners + Poster Showcase */}
+        <section
+          id="banners"
+          className="w-full px-4 sm:px-8 md:px-12 lg:px-16 max-w-[1400px] mx-auto py-14 sm:py-18 space-y-12"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="space-y-1.5">
+              <h2 className="text-2xl sm:text-3xl font-black text-white font-display tracking-tight">
+                Movies &amp; Series Now Streaming
+              </h2>
+              <p className="text-sm text-slate-400 max-w-xl">
+                Blockbuster cinema, acclaimed original series, and restored classics ready in 720p and 1080p Full HD.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => focusAuthMode('signup')}
+              className="text-xs font-bold text-rose-400 hover:text-rose-300 inline-flex items-center gap-1.5 self-start sm:self-auto cursor-pointer"
+            >
+              <span>Unlock Full Library</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Widescreen 16:9 Cinema Banners */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            {widescreenBanners.map((item) => {
+              const imgErrorKey = `banner-${item.id}`;
+              const hasFailed = Boolean(failedImages[imgErrorKey]);
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => focusAuthMode('login', item.title)}
+                  className="group relative aspect-[16/9] rounded-2xl overflow-hidden border border-white/10 bg-[#0E121B] text-left cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+                >
+                  {!hasFailed ? (
+                    <img
+                      src={item.backdropUrl}
+                      alt={`${item.title} (${item.year}) banner`}
+                      referrerPolicy="no-referrer"
+                      onError={() =>
+                        setFailedImages((prev) => ({ ...prev, [imgErrorKey]: true }))
+                      }
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-900 to-[#140A10] text-slate-400">
+                      {item.type === 'series' ? (
+                        <Tv className="w-7 h-7 text-rose-500" />
+                      ) : (
+                        <Film className="w-7 h-7 text-rose-500" />
+                      )}
+                      <span className="text-xs font-semibold text-slate-300">{item.title}</span>
+                    </div>
+                  )}
+
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#080A0F] via-[#080A0F]/45 to-transparent" />
+
+                  <div className="absolute inset-x-0 bottom-0 p-4 sm:p-5 flex items-end justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-base sm:text-lg font-bold text-white font-display truncate">
+                        {item.title}
+                      </p>
+                      <p className="text-xs text-slate-300 truncate mt-0.5 tabular-nums">
+                        {item.type === 'series' ? 'Series' : 'Film'} · {item.year} ·{' '}
+                        {item.genres.slice(0, 2).join(' / ')}
+                      </p>
+                    </div>
+                    <div className="w-9 h-9 rounded-full bg-rose-600/90 group-hover:bg-rose-600 flex items-center justify-center text-white shrink-0 transition-colors shadow-lg">
+                      <Play className="w-4 h-4 fill-white translate-x-0.5" />
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Poster Showcase Row (Series & Films) */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base sm:text-lg font-bold text-white font-display">
+                Acclaimed Series &amp; Cinema Picks
+              </h3>
+              <span className="text-xs text-slate-400">
+                Click any title to sign in and watch
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 sm:gap-5">
+              {posterLineup.map((item) => {
+                const imgErrorKey = `poster-${item.id}`;
+                const hasFailed = Boolean(failedImages[imgErrorKey]);
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => focusAuthMode('login', item.title)}
+                    className="group text-left space-y-2 cursor-pointer focus:outline-none"
+                  >
+                    <div className="relative aspect-[2/3] rounded-xl overflow-hidden border border-white/10 bg-[#0E121B]">
+                      {!hasFailed ? (
+                        <img
+                          src={item.posterUrl}
+                          alt={`${item.title} poster`}
+                          referrerPolicy="no-referrer"
+                          onError={() =>
+                            setFailedImages((prev) => ({ ...prev, [imgErrorKey]: true }))
+                          }
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-3 text-center bg-gradient-to-br from-slate-900 to-slate-950 text-slate-400">
+                          <Film className="w-6 h-6 text-rose-500" />
+                          <span className="text-xs font-semibold text-slate-200">
+                            {item.title}
+                          </span>
+                        </div>
+                      )}
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
+                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <Play className="w-3.5 h-3.5 fill-white" />
+                          <span>Watch in HD</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-0.5 px-0.5">
+                      <p className="text-xs sm:text-sm font-bold text-white truncate">
+                        {item.title}
+                      </p>
+                      <p className="text-xs text-slate-400 truncate tabular-nums">
+                        {item.type === 'series' ? 'Series' : 'Film'} · {item.year}
+                        {item.imdbScore > 0 ? ` · ${item.imdbScore.toFixed(1)} IMDb` : ''}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -543,9 +748,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
         {/* Full-Width 4-Column Capability Strip */}
         <section
           id="capabilities"
-          className="border-b border-white/10 bg-[#0B0E16]"
+          className="border-y border-white/10 bg-[#0B0E16]"
         >
-          <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 max-w-[1400px] mx-auto py-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+          <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 max-w-[1400px] mx-auto py-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
             <div className="space-y-2">
               <p className="text-xs font-mono tabular-nums text-rose-400">01.</p>
               <h3 className="text-base font-bold text-white font-display">
@@ -588,10 +793,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onContinueAsGuest }) =
           </div>
         </section>
 
-        {/* Asymmetric Showcase Section */}
+        {/* Asymmetric Household & Offline Showcase */}
         <section
           id="profiles"
-          className="w-full px-4 sm:px-8 md:px-12 lg:px-16 max-w-[1400px] mx-auto py-14 sm:py-20 space-y-12"
+          className="w-full px-4 sm:px-8 md:px-12 lg:px-16 max-w-[1400px] mx-auto py-14 sm:py-20"
         >
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
             <div className="lg:col-span-7 rounded-2xl bg-[#0E121B] border border-white/10 overflow-hidden flex flex-col">
