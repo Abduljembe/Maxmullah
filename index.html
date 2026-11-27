@@ -10,14 +10,23 @@
         window.__MULLAHMAX_ALLOW_POPUP__ = false;
 
         var AD_PATTERNS = /popads|popcash|propeller|adsterra|monetag|exoclick|juicyads|hilltopads|acscdn|onmarshtomorrow|onclickalgo|onclkds|doubleclick|googlesyndication|histats|ad-maven|bidvertiser|trafficjunky|clksite|clickadu|realsrv|trackwill|tsyndicate|adserver/i;
+        var AUTH_PATTERNS = /\/__\/auth\/|accounts\.google\.com|firebaseapp\.com|google\.com\/o\/oauth2/i;
         var nativeOpen = window.open ? window.open.bind(window) : function () { return null; };
+
+        function shouldAllowOpen(url) {
+          var s = String(url || '');
+          if (AD_PATTERNS.test(s)) return false;
+          if (window.__MULLAHMAX_ALLOW_POPUP__) return true;
+          if (AUTH_PATTERNS.test(s)) return true;
+          return !document.querySelector('iframe[data-mullahmax-player="true"]');
+        }
 
         try {
           Object.defineProperty(window, 'open', {
             configurable: false,
             writable: false,
             value: function (url, target, features) {
-              if (window.__MULLAHMAX_ALLOW_POPUP__) {
+              if (shouldAllowOpen(url)) {
                 window.__MULLAHMAX_ALLOW_POPUP__ = false;
                 return nativeOpen(url, target, features);
               }
@@ -26,7 +35,7 @@
           });
         } catch (e) {
           window.open = function (url, target, features) {
-            if (window.__MULLAHMAX_ALLOW_POPUP__) {
+            if (shouldAllowOpen(url)) {
               window.__MULLAHMAX_ALLOW_POPUP__ = false;
               return nativeOpen(url, target, features);
             }
@@ -39,7 +48,8 @@
         HTMLAnchorElement.prototype.click = function () {
           var href = this.getAttribute('href') || '';
           var sameOrigin = !href || href.startsWith('/') || href.startsWith('#') || href.startsWith('blob:') || href.startsWith(window.location.origin);
-          if (!sameOrigin && !window.__MULLAHMAX_ALLOW_POPUP__ && !this.dataset.mullahmaxAllowed) {
+          var playerActive = !!document.querySelector('iframe[data-mullahmax-player="true"]');
+          if ((AD_PATTERNS.test(href) || (!sameOrigin && playerActive)) && !window.__MULLAHMAX_ALLOW_POPUP__ && !this.dataset.mullahmaxAllowed) {
             return;
           }
           return origAnchorClick.apply(this, arguments);

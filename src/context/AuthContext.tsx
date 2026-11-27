@@ -13,6 +13,7 @@ import {
   signOut,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase';
+import { allowNextUserPopup } from '../utils/adBlocker';
 
 interface AuthContextType {
   user: User | null;
@@ -92,6 +93,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithGoogle = async () => {
     try {
+      allowNextUserPopup();
       googleProvider.setCustomParameters({ prompt: 'select_account' });
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
