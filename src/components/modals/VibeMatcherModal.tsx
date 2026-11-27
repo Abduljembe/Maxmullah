@@ -185,12 +185,14 @@ export const VibeMatcherModal: React.FC<VibeMatcherModalProps> = ({
                   }}
                   className="flex items-center gap-3.5 min-w-0 cursor-pointer"
                 >
-                  <img
-                    src={item.posterUrl}
-                    alt={item.title}
-                    referrerPolicy="no-referrer"
-                    className="w-12 h-16 object-cover rounded-lg shrink-0 border border-white/10"
-                  />
+                  {item.posterUrl ? (
+                    <img
+                      src={item.posterUrl}
+                      alt={item.title}
+                      referrerPolicy="no-referrer"
+                      className="w-12 h-16 object-cover rounded-lg shrink-0 border border-white/10"
+                    />
+                  ) : null}
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 mb-1 text-[11px] text-slate-300 tabular-nums">
                       {item.imdbScore > 0 && (

@@ -47,6 +47,7 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
   const pageRef = useRef(1);
   const totalPagesRef = useRef(500);
   const fetchingRef = useRef(false);
+  const errorStreakRef = useRef(0);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const fallbackRef = useRef(fallbackCatalog);
   fallbackRef.current = fallbackCatalog;
@@ -56,9 +57,10 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
 
   const loadPage = useCallback(
     async (pageToLoad: number, append: boolean) => {
-      if (pageToLoad === 1) {
+      if (pageToLoad === 1 && !append) {
         setIsLoading(true);
         fetchingRef.current = false;
+        errorStreakRef.current = 0;
       } else {
         if (fetchingRef.current) return;
         fetchingRef.current = true;
@@ -70,6 +72,7 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
           fetchServerMovies({ feed: 'popular', page: pageToLoad, watchProviderId }),
           fetchServerSeries({ feed: 'popular', page: pageToLoad, watchProviderId }),
         ]);
+        errorStreakRef.current = 0;
 
         const interleaved: MediaItem[] = [];
         const maxLen = Math.max(movieRes.items.length, seriesRes.items.length);
@@ -94,8 +97,13 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
           setHasMorePages(false);
         }
       } catch {
-        if (!append) setItems(fallbackRef.current);
-        setHasMorePages(false);
+        errorStreakRef.current += 1;
+        if (!append) {
+          setItems(fallbackRef.current);
+          setHasMorePages(false);
+        } else {
+          setHasMorePages(errorStreakRef.current < 3);
+        }
       } finally {
         setIsLoading(false);
         setIsLoadingMore(false);
@@ -119,21 +127,42 @@ export const NetworksView: React.FC<NetworksViewProps> = ({
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel || isLoading || !hasMorePages) return;
-    if (typeof IntersectionObserver === 'undefined') return;
+    if (isLoading || !hasMorePages) return;
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          handleLoadMore();
-        }
-      },
-      { rootMargin: '900px 0px', threshold: 0.01 }
-    );
+    const checkNeedMore = () => {
+      if (fetchingRef.current) return;
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const docHeight = document.documentElement.scrollHeight;
+      if (scrollBottom >= docHeight - 1000) {
+        handleLoadMore();
+      }
+    };
+    window.addEventListener('scroll', checkNeedMore, { passive: true });
 
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [isLoading, hasMorePages, items.length, handleLoadMore]);
+    let observer: IntersectionObserver | null = null;
+    if (sentinel && typeof IntersectionObserver !== 'undefined') {
+      observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((e) => e.isIntersecting)) {
+            handleLoadMore();
+          }
+        },
+        { rootMargin: '1100px 0px', threshold: 0.01 }
+      );
+      observer.observe(sentinel);
+    }
+
+    let rafId = 0;
+    if (!isLoadingMore) {
+      rafId = window.requestAnimationFrame(checkNeedMore);
+    }
+
+    return () => {
+      window.removeEventListener('scroll', checkNeedMore);
+      if (rafId) window.cancelAnimationFrame(rafId);
+      observer?.disconnect();
+    };
+  }, [isLoading, isLoadingMore, hasMorePages, items.length, handleLoadMore]);
 
   return (
     <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto py-8 space-y-8">

@@ -71,6 +71,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
   const totalPagesRef = useRef(500);
   const isFetchingMoreRef = useRef(false);
   const emptyStreakRef = useRef(0);
+  const errorStreakRef = useRef(0);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const fallbackMoviesRef = useRef(initialCatalogMovies);
   fallbackMoviesRef.current = initialCatalogMovies;
@@ -151,6 +152,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
         setIsLoading(true);
         isFetchingMoreRef.current = false;
         emptyStreakRef.current = 0;
+        errorStreakRef.current = 0;
       } else {
         if (isFetchingMoreRef.current) return;
         isFetchingMoreRef.current = true;
@@ -213,6 +215,7 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
           }
         } else {
           const result = await fetchBatchForPage(pageToLoad);
+          errorStreakRef.current = 0;
           pageRef.current = pageToLoad;
           totalPagesRef.current = Math.max(pageToLoad, result.totalPages || totalPagesRef.current);
           const filteredItems = applyGenreFilterIfNeeded(result.items);
@@ -222,11 +225,12 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
             setHasMorePages(pageToLoad < totalPagesRef.current);
           } else {
             emptyStreakRef.current += 1;
-            setHasMorePages(emptyStreakRef.current < 2 && pageToLoad < totalPagesRef.current);
+            setHasMorePages(emptyStreakRef.current < 3 && pageToLoad < totalPagesRef.current);
           }
         }
       } catch (err) {
         console.warn('MoviesView loadMovies error:', err);
+        errorStreakRef.current += 1;
         if (!append) {
           const localFallback = fallbackMoviesRef.current.filter((m) => {
             if (m.type !== 'movie') return false;
@@ -238,8 +242,10 @@ export const MoviesView: React.FC<MoviesViewProps> = ({
             return true;
           });
           setServerMovies(localFallback);
+          setHasMorePages(false);
+        } else {
+          setHasMorePages(errorStreakRef.current < 3);
         }
-        setHasMorePages(false);
       } finally {
         setIsLoading(false);
         setIsLoadingMore(false);

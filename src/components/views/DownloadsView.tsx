@@ -197,12 +197,14 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                 className="p-4 rounded-2xl bg-[#0E121B] border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
               >
                 <div className="flex items-center gap-4">
-                  <img
-                    src={item.posterUrl}
-                    alt={item.title}
-                    referrerPolicy="no-referrer"
-                    className="w-12 h-16 object-cover rounded-lg shrink-0"
-                  />
+                  {item.posterUrl ? (
+                    <img
+                      src={item.posterUrl}
+                      alt={item.title}
+                      referrerPolicy="no-referrer"
+                      className="w-12 h-16 object-cover rounded-lg shrink-0"
+                    />
+                  ) : null}
                   <div>
                     <h3 className="text-sm font-bold text-white">
                       {item.title}
@@ -294,13 +296,15 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                 className="group relative p-4 rounded-2xl bg-[#0E121B] hover:bg-[#131824] border border-white/10 transition-all flex items-center justify-between gap-4"
               >
                 <div className="flex items-center gap-4 min-w-0">
-                  <div className="relative w-16 h-22 rounded-xl overflow-hidden shrink-0 border border-white/10">
-                    <img
-                      src={item.posterUrl}
-                      alt={item.title}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                    />
+                  <div className="relative w-16 h-22 rounded-xl overflow-hidden shrink-0 border border-white/10 bg-slate-900">
+                    {item.posterUrl ? (
+                      <img
+                        src={item.posterUrl}
+                        alt={item.title}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                      />
+                    ) : null}
                     <button
                       onClick={() => handlePlay(item)}
                       className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity cursor-pointer"

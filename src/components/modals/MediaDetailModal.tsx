@@ -157,12 +157,14 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
 
         {/* Hero Backdrop Banner */}
         <div className="relative w-full h-72 sm:h-96 overflow-hidden">
-          <img
-            src={media.backdropUrl}
-            alt={media.title}
-            referrerPolicy="no-referrer"
-            className="w-full h-full object-cover object-center"
-          />
+          {(media.backdropUrl || media.posterUrl) ? (
+            <img
+              src={media.backdropUrl || media.posterUrl}
+              alt={media.title}
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-cover object-center"
+            />
+          ) : null}
           <div className="absolute inset-0 bg-gradient-to-t from-[#0B0E17] via-[#0B0E17]/60 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-[#0B0E17] via-[#0B0E17]/40 to-transparent" />
 
@@ -567,12 +569,14 @@ export const MediaDetailModal: React.FC<MediaDetailModalProps> = ({
                     className="group relative rounded-xl overflow-hidden border border-white/10 bg-slate-900 cursor-pointer hover:border-rose-500/50 transition-all hover:-translate-y-1"
                   >
                     <div className="aspect-[3/4] w-full overflow-hidden">
-                      <img
-                        src={item.posterUrl}
-                        alt={item.title}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      />
+                      {item.posterUrl ? (
+                        <img
+                          src={item.posterUrl}
+                          alt={item.title}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                      ) : null}
                     </div>
                     <div className="p-3">
                       <h4 className="text-xs font-bold text-white truncate">{item.title}</h4>

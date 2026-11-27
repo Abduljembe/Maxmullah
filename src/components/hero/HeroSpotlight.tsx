@@ -77,14 +77,16 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
       className="relative w-full h-[82vh] min-h-[560px] xl:min-h-[680px] 2xl:min-h-[780px] overflow-hidden select-none group"
     >
       {/* Background Cinematic Image */}
-      <img
-        key={currentItem.id}
-        src={imageError ? currentItem.posterUrl : currentItem.backdropUrl}
-        alt={currentItem.title}
-        referrerPolicy="no-referrer"
-        onError={() => setImageError(true)}
-        className="absolute inset-0 w-full h-full object-cover object-center scale-100 transition-all duration-700 ease-out"
-      />
+      {(imageError ? currentItem.posterUrl : currentItem.backdropUrl || currentItem.posterUrl) ? (
+        <img
+          key={currentItem.id}
+          src={(imageError ? currentItem.posterUrl : currentItem.backdropUrl || currentItem.posterUrl) || undefined}
+          alt={currentItem.title}
+          referrerPolicy="no-referrer"
+          onError={() => setImageError(true)}
+          className="absolute inset-0 w-full h-full object-cover object-center scale-100 transition-all duration-700 ease-out"
+        />
+      ) : null}
 
       {/* Cinematic Scrims */}
       <div className="absolute inset-0 scrim-hero" />

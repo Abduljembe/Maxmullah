@@ -42,6 +42,7 @@ import {
   saveVidLinkMediaData,
   isLikelyAnime,
   buildProxiedMediaUrl,
+  isNestedPreviewFrame,
 } from '../../services/videoProviderService';
 import { injectAdShieldIntoIframe, prewarmStreamUrl } from '../../utils/adBlocker';
 
@@ -64,12 +65,11 @@ interface TrackOption {
 }
 
 const DEFAULT_FALLBACK_QUEUE: AnyServerId[] = [
-  'autoembed',
   'vidsrc_sh',
   'vidlink',
-  'vidsrc_wtf',
   'vidnest',
   'vidsrc_su',
+  'vidsrc',
 ];
 const DEPRECATED_QUEUE_SERVERS = new Set<AnyServerId>([
   'vidfast',
@@ -77,6 +77,7 @@ const DEPRECATED_QUEUE_SERVERS = new Set<AnyServerId>([
   'superembed',
   '2embed',
   'primesrc',
+  ...(isNestedPreviewFrame() ? (['autoembed', 'vidsrc_wtf'] as AnyServerId[]) : []),
 ]);
 const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2];
 
@@ -519,6 +520,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       if (
         (rawData.type === 'ERROR' ||
           rawData.type === 'VS_EXPIRED' ||
+          rawData.type === 'MEDIA_NOT_FOUND' ||
           (rawData as { event?: string }).event === 'error') &&
         queueIndex < serverQueue.length - 1
       ) {
@@ -1129,7 +1131,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       )}
 
       {/* 1. EMBED FALLBACK PLAYER (for titles without a direct CDN/HLS link) */}
-      {playerMode === 'stream' && !isResolvingServer && (
+      {playerMode === 'stream' && !isResolvingServer && activeStreamSource.url && (
         <div className="w-full h-full relative bg-black overflow-hidden">
           <iframe
             key={`player-frame-${activeServer}-${currentSeason}-${currentEpisode}-${iframeKey}`}

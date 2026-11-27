@@ -74,12 +74,14 @@ export const SeriesEpisodePickerModal: React.FC<SeriesEpisodePickerModalProps> =
       <div className="relative w-full max-w-4xl xl:max-w-5xl rounded-3xl bg-[#0B0E17] border border-white/10 shadow-2xl overflow-hidden text-slate-100 max-h-[92vh] flex flex-col my-auto">
         {/* Header Hero Banner */}
         <div className="relative h-44 sm:h-52 w-full overflow-hidden shrink-0 bg-slate-900">
-          <img
-            src={media.backdropUrl}
-            alt={media.title}
-            referrerPolicy="no-referrer"
-            className="w-full h-full object-cover object-center"
-          />
+          {(media.backdropUrl || media.posterUrl) ? (
+            <img
+              src={media.backdropUrl || media.posterUrl}
+              alt={media.title}
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-cover object-center"
+            />
+          ) : null}
           <div className="absolute inset-0 bg-gradient-to-t from-[#0B0E17] via-[#0B0E17]/60 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-[#0B0E17] via-transparent to-transparent" />
 

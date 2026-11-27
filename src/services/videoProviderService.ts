@@ -129,12 +129,25 @@ export const VIDUKI_SERVERS: VidukiServerDefinition[] = [
 
 const VALID_SERVER_IDS = new Set<string>(VIDUKI_SERVERS.map((s) => s.id));
 const DEPRECATED_SERVER_IDS = new Set<string>(['vidfast', 'videasy', 'superembed', '2embed']);
+const SANDBOX_SENSITIVE_SERVERS = new Set<string>(['autoembed', 'vidsrc_wtf']);
+
+export function isNestedPreviewFrame(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
 
 export function normalizeActiveServerId(raw?: string | null): AnyServerId {
   if (raw && VALID_SERVER_IDS.has(raw) && !DEPRECATED_SERVER_IDS.has(raw)) {
+    if (isNestedPreviewFrame() && SANDBOX_SENSITIVE_SERVERS.has(raw)) {
+      return 'vidsrc_sh';
+    }
     return raw as AnyServerId;
   }
-  return 'vidsrc_su';
+  return 'vidsrc_sh';
 }
 
 export function isAdFreeServer(serverId: AnyServerId): boolean {
@@ -142,16 +155,9 @@ export function isAdFreeServer(serverId: AnyServerId): boolean {
 }
 
 export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
-  const order: AnyServerId[] = [
-    'autoembed',
-    'vidsrc_sh',
-    'vidlink',
-    'vidsrc_wtf',
-    'vidnest',
-    'vidsrc_su',
-    'vixsrc',
-    'vidsrc',
-  ];
+  const order: AnyServerId[] = isNestedPreviewFrame()
+    ? ['vidsrc_sh', 'vidlink', 'vidnest', 'vidsrc_su', 'vixsrc', 'vidsrc']
+    : ['vidsrc_sh', 'autoembed', 'vidlink', 'vidsrc_wtf', 'vidnest', 'vidsrc_su', 'vixsrc', 'vidsrc'];
   const idx = order.indexOf(currentServer);
   if (idx === -1 || idx === order.length - 1) {
     return order[0];
@@ -228,13 +234,13 @@ export interface VidLinkMediaDataEvent {
   data: Record<string, VidLinkMediaProgressEntry> | VidLinkMediaProgressEntry;
 }
 
-const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v12';
+const STORAGE_KEY_PROVIDER = 'mullahmax_video_provider_cfg_v13';
 const STORAGE_KEY_RESUME_PREFIX = 'mullahmax_resume_sec_';
 export const STORAGE_KEY_VIDLINK_PROGRESS = 'vidLinkProgress';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
-  provider: 'autoembed',
-  vidukiServer: 'autoembed',
+  provider: 'vidsrc_sh',
+  vidukiServer: 'vidsrc_sh',
   accentColor: 'FFFFFF',
   secondaryColor: '3F3F46',
   iconColor: 'FFFFFF',
@@ -1095,8 +1101,8 @@ export async function fetchLiveServerSources(
     return {
       vidlinkAvailable: true,
       vixsrcAvailable: false,
-      recommendedServer: 'autoembed',
-      availableServers: ['autoembed', 'vidsrc_sh', 'vidlink', 'vidsrc_wtf', 'vidnest'],
+      recommendedServer: 'vidsrc_sh',
+      availableServers: ['vidsrc_sh', 'vidlink', 'vidnest', 'vidsrc_su'],
       primeSrcHosts: [],
     };
   })();

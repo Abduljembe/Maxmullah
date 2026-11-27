@@ -38,6 +38,7 @@ import { DownloadsView } from './components/views/DownloadsView';
 import { MoviesView, MoviesViewFeed } from './components/views/MoviesView';
 import { SeriesView, SeriesViewFeed } from './components/views/SeriesView';
 import { TrendingAndNewSection, SeeAllTarget } from './components/views/TrendingAndNewSection';
+import { HomeInfiniteCatalogGrid } from './components/views/HomeInfiniteCatalogGrid';
 import { NetworksView } from './components/views/NetworksView';
 import { TMDBSettingsModal } from './components/modals/TMDBSettingsModal';
 import {
@@ -295,12 +296,19 @@ function MainAppContent() {
 
     return entries.map((entry) => {
       const existing = catalog.find((m) => m.tmdbId === entry.id || m.id === String(entry.id));
-      const poster = entry.poster_path
-        ? buildTMDBImageUrl(entry.poster_path, 'poster', 'w500')
-        : existing?.posterUrl || '';
-      const backdrop = entry.backdrop_path
-        ? buildTMDBImageUrl(entry.backdrop_path, 'backdrop', 'original')
-        : existing?.backdropUrl || poster;
+      const fallbackSvg =
+        'data:image/svg+xml;utf8,' +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><rect width="400" height="600" fill="#0e121b"/><rect x="150" y="250" width="100" height="100" rx="20" fill="#1e293b"/><polygon points="188,280 188,320 222,300" fill="#e11d48"/></svg>'
+        );
+      const poster =
+        (entry.poster_path ? buildTMDBImageUrl(entry.poster_path, 'poster', 'w500') : '') ||
+        existing?.posterUrl ||
+        fallbackSvg;
+      const backdrop =
+        (entry.backdrop_path ? buildTMDBImageUrl(entry.backdrop_path, 'backdrop', 'original') : '') ||
+        existing?.backdropUrl ||
+        poster;
 
       const mediaItem: MediaItem = existing || {
         id: `tmdb-${entry.type === 'tv' ? 'tv' : 'movie'}-${entry.id}`,
@@ -531,6 +539,15 @@ function MainAppContent() {
                 })}
               </div>
             </div>
+
+            {/* Endless Discovery Grid: keeps loading more movies as you scroll down on Home */}
+            <HomeInfiniteCatalogGrid
+              selectedPlatform={selectedPlatform}
+              onSelect={setSelectedMedia}
+              onPlay={(m) => handlePlayMedia(m)}
+              onDownload={(m) => setDownloadTarget({ media: m })}
+              onItemsLoaded={mergeCatalogItems}
+            />
           </div>
         )}
 

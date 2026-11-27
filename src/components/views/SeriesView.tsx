@@ -70,6 +70,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
   const totalPagesRef = useRef(500);
   const isFetchingMoreRef = useRef(false);
   const emptyStreakRef = useRef(0);
+  const errorStreakRef = useRef(0);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const fallbackSeriesRef = useRef(initialCatalogSeries);
   fallbackSeriesRef.current = initialCatalogSeries;
@@ -148,6 +149,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
         setIsLoading(true);
         isFetchingMoreRef.current = false;
         emptyStreakRef.current = 0;
+        errorStreakRef.current = 0;
       } else {
         if (isFetchingMoreRef.current) return;
         isFetchingMoreRef.current = true;
@@ -184,6 +186,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
           }
         } else {
           const result = await fetchBatchForPage(pageToLoad);
+          errorStreakRef.current = 0;
           pageRef.current = pageToLoad;
           totalPagesRef.current = Math.max(pageToLoad, result.totalPages || totalPagesRef.current);
           if (result.items.length > 0) {
@@ -192,15 +195,18 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
             setHasMorePages(pageToLoad < totalPagesRef.current);
           } else {
             emptyStreakRef.current += 1;
-            setHasMorePages(emptyStreakRef.current < 2 && pageToLoad < totalPagesRef.current);
+            setHasMorePages(emptyStreakRef.current < 3 && pageToLoad < totalPagesRef.current);
           }
         }
       } catch (err) {
         console.warn('SeriesView loadSeries error:', err);
+        errorStreakRef.current += 1;
         if (!append) {
           setServerSeries(fallbackSeriesRef.current.filter((m) => m.type === 'series'));
+          setHasMorePages(false);
+        } else {
+          setHasMorePages(errorStreakRef.current < 3);
         }
-        setHasMorePages(false);
       } finally {
         setIsLoading(false);
         setIsLoadingMore(false);

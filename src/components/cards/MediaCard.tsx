@@ -48,13 +48,15 @@ export const MediaCard: React.FC<MediaCardProps> = ({
     >
       {/* Poster Image Container */}
       <div className="relative aspect-[2/3] w-full rounded-xl overflow-hidden bg-[#121622] border border-white/10 group-hover:border-white/30 transition-all duration-200 group-hover:-translate-y-1 shadow-lg">
-        <img
-          src={media.posterUrl}
-          alt={media.title}
-          referrerPolicy="no-referrer"
-          loading="lazy"
-          className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
-        />
+        {media.posterUrl ? (
+          <img
+            src={media.posterUrl}
+            alt={media.title}
+            referrerPolicy="no-referrer"
+            loading="lazy"
+            className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
+          />
+        ) : null}
 
         {/* Subtle Top/Bottom Contrast Scrim */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/35 opacity-80 group-hover:opacity-60 transition-opacity" />
