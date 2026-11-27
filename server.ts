@@ -140,11 +140,20 @@ interface SavedStreamEntry {
   updatedAt: string;
 }
 
+type DirectStreamCodec = 'h264' | 'hevc' | 'mp4' | 'hls';
+
 interface DirectMediaResolution {
   url: string;
   subtitleUrl?: string;
   subtitleLabel?: string;
   referer?: string;
+  needsProxy?: boolean;
+  codec?: DirectStreamCodec;
+}
+
+interface DirectMediaBundle {
+  primary: DirectMediaResolution;
+  fallbacks: DirectMediaResolution[];
 }
 
 const vixsrcIndexCache = new Map<string, VixSrcIndexStore>();
@@ -153,8 +162,13 @@ const tmdbProxyCache = new Map<string, { data: unknown; fetchedAt: number }>();
 const externalIdCache = new Map<string, { imdbId: string | null; fetchedAt: number }>();
 const searchCache = new Map<string, { results: Record<string, unknown>[]; fetchedAt: number }>();
 const malIdCache = new Map<string, { malId: number | null; fetchedAt: number }>();
-const sourcesResponseCache = new Map<string, { data: Record<string, unknown>; fetchedAt: number }>();
+const sourcesResponseCache = new Map<
+  string,
+  { data: Record<string, unknown>; fetchedAt: number; ttlMs: number }
+>();
+const playlistProxyCache = new Map<string, { body: string; fetchedAt: number }>();
 let tmdbConfigCache: { data: TMDBConfigurationPayload; fetchedAt: number } | null = null;
+let publicDirectCooldownUntil = 0;
 
 const INDEX_CACHE_TTL_MS = 30 * 60 * 1000;
 const TMDB_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -162,6 +176,10 @@ const TMDB_CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const TMDB_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
 const SOURCES_CACHE_TTL_MS = 5 * 60 * 1000;
+const SOURCES_NEGATIVE_CACHE_TTL_MS = 15 * 1000;
+const PUBLIC_DIRECT_COOLDOWN_MS = 45 * 1000;
+const PLAYLIST_PROXY_CACHE_TTL_MS = 60 * 1000;
+const PLAYLIST_PROXY_CACHE_MAX = 60;
 
 let streamsStoreCache: Record<string, SavedStreamEntry> | null = null;
 
@@ -621,6 +639,18 @@ function rewriteHlsPlaylistForProxy(
     .join('\n');
 }
 
+function convertSrtToWebVtt(rawText: string): string {
+  const normalized = rawText.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (normalized.trimStart().startsWith('WEBVTT')) {
+    return normalized;
+  }
+  const vttBody = normalized.replace(
+    /(\d{2}:\d{2}:\d{2}),(\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}),(\d{3})/g,
+    '$1.$2 --> $3.$4'
+  );
+  return `WEBVTT\n\n${vttBody}`;
+}
+
 async function resolveDirectMediaSource(
   type: 'movie' | 'tv',
   tmdbId: number,
@@ -628,13 +658,18 @@ async function resolveDirectMediaSource(
   season: number,
   episode: number,
   savedEntry?: SavedStreamEntry
-): Promise<DirectMediaResolution | null> {
+): Promise<DirectMediaBundle | null> {
   if (savedEntry?.url && isAllowedRemoteUrl(savedEntry.url)) {
     return {
-      url: savedEntry.url,
-      subtitleUrl: savedEntry.subtitleUrl,
-      subtitleLabel: savedEntry.subtitleLabel,
-      referer: savedEntry.referer,
+      primary: {
+        url: savedEntry.url,
+        subtitleUrl: savedEntry.subtitleUrl,
+        subtitleLabel: savedEntry.subtitleLabel,
+        referer: savedEntry.referer,
+        needsProxy: Boolean(savedEntry.referer),
+        codec: /\.mp4(\?|$)/i.test(savedEntry.url) ? 'mp4' : 'hls',
+      },
+      fallbacks: [],
     };
   }
 
@@ -658,7 +693,14 @@ async function resolveDirectMediaSource(
           const data = (await res.json()) as { Items?: Array<{ Id?: string }> };
           const itemId = data.Items?.[0]?.Id;
           if (itemId && /^[a-zA-Z0-9_-]+$/.test(itemId)) {
-            return { url: `/api/jellyfin-stream/${encodeURIComponent(itemId)}/master.m3u8` };
+            return {
+              primary: {
+                url: `/api/jellyfin-stream/${encodeURIComponent(itemId)}/master.m3u8`,
+                needsProxy: false,
+                codec: 'hls',
+              },
+              fallbacks: [],
+            };
           }
         }
       } else {
@@ -686,7 +728,14 @@ async function resolveDirectMediaSource(
               };
               const matchedEp = epData.Items?.find((ep) => ep.IndexNumber === episode);
               if (matchedEp?.Id && /^[a-zA-Z0-9_-]+$/.test(matchedEp.Id)) {
-                return { url: `/api/jellyfin-stream/${encodeURIComponent(matchedEp.Id)}/master.m3u8` };
+                return {
+                  primary: {
+                    url: `/api/jellyfin-stream/${encodeURIComponent(matchedEp.Id)}/master.m3u8`,
+                    needsProxy: false,
+                    codec: 'hls',
+                  },
+                  fallbacks: [],
+                };
               }
             }
           }
@@ -725,15 +774,27 @@ async function resolveDirectMediaSource(
         });
         const ct = (probe.headers.get('content-type') || '').toLowerCase();
         if (probe.ok && !ct.includes('text/html')) {
-          return candidate;
+          const acao = (probe.headers.get('access-control-allow-origin') || '').trim();
+          return {
+            url: candidate,
+            needsProxy: acao !== '*',
+            codec: (/\.mp4(\?|$)/i.test(candidate) ? 'mp4' : 'hls') as DirectStreamCodec,
+          };
         }
         throw new Error('not playable');
       })
     );
+    const workingCdn: DirectMediaResolution[] = [];
     for (const r of probeResults) {
       if (r.status === 'fulfilled' && r.value) {
-        return { url: r.value };
+        workingCdn.push(r.value);
       }
+    }
+    if (workingCdn.length > 0) {
+      return {
+        primary: workingCdn[0],
+        fallbacks: workingCdn.slice(1),
+      };
     }
   }
 
@@ -793,7 +854,11 @@ async function resolvePublicDirectStream(
   tmdbId: number,
   season: number,
   episode: number
-): Promise<DirectMediaResolution | null> {
+): Promise<DirectMediaBundle | null> {
+  if (Date.now() < publicDirectCooldownUntil) {
+    return null;
+  }
+
   const pathSuffix =
     type === 'tv' ? `tv/${tmdbId}/${season}/${episode}` : `movie/${tmdbId}`;
 
@@ -842,6 +907,7 @@ async function resolvePublicDirectStream(
 
       let streamUrl = typeof data.url === 'string' ? data.url.trim() : '';
       let customRef = candidate.defaultReferer;
+      let explicitRefererNeeded = false;
       if (!streamUrl && Array.isArray(data.streams)) {
         const firstValid = data.streams.find(
           (s): s is { url?: string; headers?: { Referer?: string } } =>
@@ -851,6 +917,7 @@ async function resolvePublicDirectStream(
           streamUrl = firstValid.url.trim();
           if (firstValid.headers?.Referer) {
             customRef = firstValid.headers.Referer;
+            explicitRefererNeeded = true;
           }
         }
       }
@@ -864,6 +931,7 @@ async function resolvePublicDirectStream(
       if (!validStream) return null;
 
       // Verify stream URL actually returns playable playlist/media (not Cloudflare 403 HTML)
+      // Also inspect CORS headers & H.264 vs HEVC codecs to optimize smoothness
       const isMp4 = /\.mp4(\?|$)/i.test(validStream.pathname);
       const verifyRes = await fetch(validStream.toString(), {
         method: isMp4 ? 'HEAD' : 'GET',
@@ -879,9 +947,22 @@ async function resolvePublicDirectStream(
       const ct = (verifyRes.headers.get('content-type') || '').toLowerCase();
       if (ct.includes('text/html') || ct.includes('application/xhtml+xml')) return null;
 
+      const acao = (verifyRes.headers.get('access-control-allow-origin') || '').trim();
+      const vary = (verifyRes.headers.get('vary') || '').toLowerCase();
+      // Only skip proxy when CDN truly returns wildcard CORS independent of Origin & no custom referer header is mandated
+      const needsProxy = explicitRefererNeeded || acao !== '*' || vary.includes('origin');
+
+      let detectedCodec: DirectStreamCodec = isMp4 ? 'mp4' : 'hls';
       if (!isMp4) {
         const snippet = (await verifyRes.text()).trimStart();
         if (!snippet.startsWith('#EXTM3U')) return null;
+        const hasAvc = /avc1/i.test(snippet);
+        const hasHevc = /(hvc1|hev1)/i.test(snippet);
+        if (hasAvc) {
+          detectedCodec = 'h264';
+        } else if (hasHevc) {
+          detectedCodec = 'hevc';
+        }
       }
 
       let subtitleUrl: string | undefined;
@@ -907,7 +988,13 @@ async function resolvePublicDirectStream(
         }
       }
 
-      const rank = candidate.id === 'flixhq' ? 0 : candidate.id === 'rogflix' ? 1 : 2;
+      // Strongly prefer H.264/AVC over HEVC for universal hardware decoding, then prefer fast hosts
+      const codecWeight =
+        detectedCodec === 'h264' ? 0 : detectedCodec === 'mp4' || detectedCodec === 'hls' ? 2 : 10;
+      const hostWeight = candidate.id === 'flixhq' ? 0 : candidate.id === 'rogflix' ? 1 : 2;
+      const directBonus = needsProxy ? 0 : -1;
+      const rank = codecWeight + hostWeight + directBonus;
+
       return {
         rank,
         resolution: {
@@ -915,6 +1002,8 @@ async function resolvePublicDirectStream(
           subtitleUrl,
           subtitleLabel,
           referer: validRef ? validRef.toString() : STREAM_ENVELOPE_REFERER,
+          needsProxy,
+          codec: detectedCodec,
         },
       };
     } catch {
@@ -928,7 +1017,16 @@ async function resolvePublicDirectStream(
     .filter((v): v is { rank: number; resolution: DirectMediaResolution } => v !== null)
     .sort((a, b) => a.rank - b.rank);
 
-  return validResults[0]?.resolution || null;
+  if (validResults.length === 0) {
+    publicDirectCooldownUntil = Date.now() + PUBLIC_DIRECT_COOLDOWN_MS;
+    return null;
+  }
+
+  publicDirectCooldownUntil = 0;
+  return {
+    primary: validResults[0].resolution,
+    fallbacks: validResults.slice(1).map((v) => v.resolution),
+  };
 }
 
 const EMBED_SHIELD_ALLOWED_HOSTS = new Set([
@@ -1349,7 +1447,7 @@ async function startServer() {
 
     const sourceCacheKey = `${type}:${rawTmdbId || initialImdbId}:s${season}e${episode}:${isFastMode ? 'fast' : 'full'}`;
     const cachedSources = sourcesResponseCache.get(sourceCacheKey);
-    if (cachedSources && Date.now() - cachedSources.fetchedAt < SOURCES_CACHE_TTL_MS) {
+    if (cachedSources && Date.now() - cachedSources.fetchedAt < cachedSources.ttlMs) {
       res.json(cachedSources.data);
       return;
     }
@@ -1488,17 +1586,20 @@ async function startServer() {
       const vixsrcAvailable = inVixCatalog && vixEmbedOk;
 
       const availableServers: Array<
-        'vidsrc_su' | 'vidsrc_sh' | 'autoembed' | 'vidlink' | 'vidnest' | 'vixsrc'
-      > = ['vidsrc_su', 'vidsrc_sh', 'autoembed', 'vidlink', 'vidnest'];
+        'autoembed' | 'vidsrc_sh' | 'vidlink' | 'vidsrc_wtf' | 'vidnest' | 'vidsrc_su' | 'vixsrc'
+      > = ['autoembed', 'vidsrc_sh', 'vidlink', 'vidsrc_wtf', 'vidnest', 'vidsrc_su'];
       if (vixsrcAvailable) availableServers.push('vixsrc');
 
-      const recommendedServer: 'vidsrc_su' | 'vixsrc' | 'vidlink' = 'vidsrc_su';
+      const recommendedServer: 'autoembed' | 'vidsrc_sh' | 'vixsrc' | 'vidlink' = 'autoembed';
 
       const payload = {
-        directStreamUrl: directResolution?.url,
-        directStreamSubtitleUrl: directResolution?.subtitleUrl,
-        directStreamSubtitleLabel: directResolution?.subtitleLabel,
-        directStreamReferer: directResolution?.referer,
+        directStreamUrl: directResolution?.primary.url,
+        directStreamSubtitleUrl: directResolution?.primary.subtitleUrl,
+        directStreamSubtitleLabel: directResolution?.primary.subtitleLabel,
+        directStreamReferer: directResolution?.primary.referer,
+        directStreamNeedsProxy: directResolution?.primary.needsProxy,
+        directStreamCodec: directResolution?.primary.codec,
+        directStreamFallbacks: directResolution?.fallbacks || [],
         vidlinkAvailable: vidlinkOk,
         vidfastAvailable: false,
         vixsrcAvailable,
@@ -1511,7 +1612,11 @@ async function startServer() {
         info: primeInfo,
       };
 
-      sourcesResponseCache.set(sourceCacheKey, { data: payload, fetchedAt: Date.now() });
+      sourcesResponseCache.set(sourceCacheKey, {
+        data: payload,
+        fetchedAt: Date.now(),
+        ttlMs: directResolution ? SOURCES_CACHE_TTL_MS : SOURCES_NEGATIVE_CACHE_TTL_MS,
+      });
       res.json(payload);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to probe server sources';
@@ -1519,8 +1624,8 @@ async function startServer() {
         error: msg,
         vidlinkAvailable: true,
         vixsrcAvailable: false,
-        recommendedServer: 'vidsrc_su',
-        availableServers: ['vidsrc_su', 'vidsrc_sh', 'autoembed', 'vidlink', 'vidnest'],
+        recommendedServer: 'autoembed',
+        availableServers: ['autoembed', 'vidsrc_sh', 'vidlink', 'vidsrc_wtf', 'vidnest', 'vidsrc_su'],
         primeSrcHosts: [],
       });
     }
@@ -1549,14 +1654,32 @@ async function startServer() {
       return;
     }
 
+    const playlistCacheKey = `${parsedUrl.toString()}|${parsedRef ? parsedRef.toString() : ''}`;
+    const rangeHeader = req.headers.range;
+    const hasRangeHeader =
+      typeof rangeHeader === 'string' && /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rangeHeader);
+
+    if (!hasRangeHeader) {
+      const cachedPlaylist = playlistProxyCache.get(playlistCacheKey);
+      if (cachedPlaylist && Date.now() - cachedPlaylist.fetchedAt < PLAYLIST_PROXY_CACHE_TTL_MS) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        res.status(200);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=30');
+        res.send(cachedPlaylist.body);
+        return;
+      }
+    }
+
     const reqHeaders: Record<string, string> = {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
       Referer: parsedRef ? parsedRef.toString() : `${parsedUrl.origin}/`,
       Origin: parsedRef ? parsedRef.origin : parsedUrl.origin,
+      Connection: 'keep-alive',
     };
-    const rangeHeader = req.headers.range;
-    if (typeof rangeHeader === 'string' && /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rangeHeader)) {
+    if (hasRangeHeader && typeof rangeHeader === 'string') {
       reqHeaders.Range = rangeHeader;
     }
     if (typeof req.headers['if-range'] === 'string') {
@@ -1584,10 +1707,16 @@ async function startServer() {
         return;
       }
 
+      const pathPlusSearch = finalUrl.pathname + finalUrl.search;
       const isLikelyPlaylist =
         contentType.includes('mpegurl') ||
         contentType.includes('vnd.apple.mpegurl') ||
-        /\.m3u8(\?|$)/i.test(finalUrl.pathname + finalUrl.search);
+        /\.m3u8(\?|$)/i.test(pathPlusSearch);
+
+      const isLikelySubtitle =
+        contentType.includes('text/vtt') ||
+        contentType.includes('subrip') ||
+        /\.(vtt|srt)(\?|$)/i.test(pathPlusSearch);
 
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
@@ -1602,16 +1731,45 @@ async function startServer() {
             '/api/stream-proxy',
             refSuffix
           );
+          if (!hasRangeHeader) {
+            if (playlistProxyCache.size >= PLAYLIST_PROXY_CACHE_MAX) {
+              const oldestKey = playlistProxyCache.keys().next().value;
+              if (oldestKey) playlistProxyCache.delete(oldestKey);
+            }
+            playlistProxyCache.set(playlistCacheKey, { body: rewritten, fetchedAt: Date.now() });
+          }
           res.status(200);
           res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-          res.setHeader('Cache-Control', 'no-store');
+          res.setHeader('Cache-Control', 'public, max-age=30');
           res.send(rewritten);
           return;
         }
-        // Not actually an M3U8 manifest; forward as plain text/subtitle
+        const normalizedSub =
+          /\.srt(\?|$)/i.test(pathPlusSearch) || /^\s*\d+\r?\n\d{2}:\d{2}:\d{2},\d{3}\s*-->/.test(playlistText)
+            ? convertSrtToWebVtt(playlistText)
+            : playlistText;
         res.status(upstream.status);
-        res.setHeader('Content-Type', contentType || 'text/plain; charset=utf-8');
-        res.send(playlistText);
+        res.setHeader(
+          'Content-Type',
+          normalizedSub.trimStart().startsWith('WEBVTT')
+            ? 'text/vtt; charset=utf-8'
+            : contentType || 'text/plain; charset=utf-8'
+        );
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        res.send(normalizedSub);
+        return;
+      }
+
+      if (isLikelySubtitle) {
+        const rawSub = await upstream.text();
+        const isSrt =
+          /\.srt(\?|$)/i.test(pathPlusSearch) ||
+          /^\s*\d+\r?\n\d{2}:\d{2}:\d{2},\d{3}\s*-->/.test(rawSub);
+        const body = isSrt ? convertSrtToWebVtt(rawSub) : rawSub;
+        res.status(200);
+        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        res.send(body);
         return;
       }
 
@@ -1623,8 +1781,6 @@ async function startServer() {
       res.status(upstream.status);
       if (contentType) {
         res.setHeader('Content-Type', contentType);
-      } else if (/\.vtt(\?|$)/i.test(finalUrl.pathname)) {
-        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
       } else {
         res.setHeader('Content-Type', 'application/octet-stream');
       }
@@ -1635,7 +1791,12 @@ async function startServer() {
       if (contentLength) res.setHeader('Content-Length', contentLength);
       if (contentRange) res.setHeader('Content-Range', contentRange);
       res.setHeader('Accept-Ranges', acceptRanges);
-      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader(
+        'Cache-Control',
+        upstream.status === 200 || /\.(ts|m4s|aac|mp4)(\?|$)/i.test(pathPlusSearch)
+          ? 'public, max-age=3600'
+          : 'no-store'
+      );
 
       const nodeStream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
       req.on('close', () => nodeStream.destroy());

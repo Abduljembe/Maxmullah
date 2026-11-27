@@ -32,7 +32,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   const hasRealRating = typeof media.imdbScore === 'number' && media.imdbScore > 0;
   const typeLabel = media.type === 'series' ? 'SERIES' : 'MOVIE';
 
-  const handleMouseEnter = () => {
+  const handlePrefetch = () => {
     prefetchLiveServerSources(media);
     const stream = generateStreamSource(media);
     prewarmStreamUrl(stream.url);
@@ -41,7 +41,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   return (
     <div
       onClick={() => onPlay(media)}
-      onMouseEnter={handleMouseEnter}
+      onMouseEnter={handlePrefetch}
+      onPointerDown={handlePrefetch}
+      onFocus={handlePrefetch}
       className="group relative flex flex-col cursor-pointer select-none"
     >
       {/* Poster Image Container */}

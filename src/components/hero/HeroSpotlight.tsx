@@ -2,6 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { Play, Download, Info, HardDrive, ChevronLeft, ChevronRight, Star } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { useOffline } from '../../context/OfflineContext';
+import {
+  generateStreamSource,
+  prefetchLiveServerSources,
+} from '../../services/videoProviderService';
+import { prewarmStreamUrl } from '../../utils/adBlocker';
 
 interface HeroSpotlightProps {
   featuredItems: MediaItem[];
@@ -37,6 +42,16 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
   useEffect(() => {
     setImageError(false);
   }, [activeIndex]);
+
+  // Preload stream resolution & preconnect CDN for the currently visible spotlight title after settle delay
+  useEffect(() => {
+    if (!currentItem) return;
+    const timer = window.setTimeout(() => {
+      prefetchLiveServerSources(currentItem);
+      prewarmStreamUrl(generateStreamSource(currentItem).url);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [currentItem]);
 
   const { isMediaDownloaded } = useOffline();
 
@@ -132,14 +147,11 @@ export const HeroSpotlight: React.FC<HeroSpotlightProps> = ({
             <button
               onClick={() => onPlay(currentItem)}
               onMouseEnter={() => {
-                import('../../services/videoProviderService').then(
-                  ({ generateStreamSource, prefetchLiveServerSources }) => {
-                    prefetchLiveServerSources(currentItem);
-                    import('../../utils/adBlocker').then(({ prewarmStreamUrl }) => {
-                      prewarmStreamUrl(generateStreamSource(currentItem).url);
-                    });
-                  }
-                );
+                prefetchLiveServerSources(currentItem);
+                prewarmStreamUrl(generateStreamSource(currentItem).url);
+              }}
+              onPointerDown={() => {
+                prefetchLiveServerSources(currentItem);
               }}
               className="flex items-center gap-2 px-7 py-3.5 rounded-xl bg-white text-slate-950 hover:bg-slate-200 font-extrabold text-sm transition-all shadow-xl cursor-pointer whitespace-nowrap"
             >

@@ -32,6 +32,7 @@ import {
   fetchLiveServerSources,
   getCachedLiveServerSources,
   LiveServerSourcesResponse,
+  DirectStreamCandidate,
   VixSrcPlayerEvent,
   VidLinkMediaDataEvent,
   VidLinkMediaProgressEntry,
@@ -63,10 +64,11 @@ interface TrackOption {
 }
 
 const DEFAULT_FALLBACK_QUEUE: AnyServerId[] = [
-  'vidsrc_sh',
   'autoembed',
-  'vidsrc_wtf',
+  'vidsrc_sh',
   'vidlink',
+  'vidsrc_wtf',
+  'vidnest',
   'vidsrc_su',
 ];
 const DEPRECATED_QUEUE_SERVERS = new Set<AnyServerId>([
@@ -112,21 +114,71 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const downloadedItem = getDownloadedMedia(media.id, currentSeason, currentEpisode);
   const hasPlayableDownloadedFile = isDirectStreamUrl(downloadedItem?.videoUrl);
 
+  const buildDirectCandidates = useCallback(
+    (
+      res: LiveServerSourcesResponse | null | undefined,
+      subFallback: string,
+      subLabelFallback: string
+    ): DirectStreamCandidate[] => {
+      const list: DirectStreamCandidate[] = [];
+      const seen = new Set<string>();
+      const pushUnique = (cand: DirectStreamCandidate | null | undefined) => {
+        if (!cand?.url || !isDirectStreamUrl(cand.url)) return;
+        const cleanUrl = cand.url.trim();
+        if (seen.has(cleanUrl)) return;
+        seen.add(cleanUrl);
+        list.push({
+          ...cand,
+          url: cleanUrl,
+          subtitleUrl: cand.subtitleUrl || subFallback || undefined,
+          subtitleLabel: cand.subtitleLabel || subLabelFallback || 'English',
+        });
+      };
+
+      if (res?.directStreamUrl) {
+        pushUnique({
+          url: res.directStreamUrl,
+          subtitleUrl: res.directStreamSubtitleUrl,
+          subtitleLabel: res.directStreamSubtitleLabel,
+          referer: res.directStreamReferer,
+          needsProxy: res.directStreamNeedsProxy,
+          codec: res.directStreamCodec,
+        });
+      }
+      if (Array.isArray(res?.directStreamFallbacks)) {
+        for (const fb of res.directStreamFallbacks) {
+          pushUnique(fb);
+        }
+      }
+      if (media.videoPreviewUrl && isDirectStreamUrl(media.videoPreviewUrl)) {
+        pushUnique({
+          url: media.videoPreviewUrl,
+          needsProxy: false,
+        });
+      }
+      return list;
+    },
+    [media.videoPreviewUrl]
+  );
+
+  const [providerCfg] = useState(() => getVideoProviderConfig());
+
   const initialCachedSources = getCachedLiveServerSources(media, seasonNumber || 1, episodeNumber || 1);
-  const initialDirectUrl =
-    initialCachedSources?.directStreamUrl && isDirectStreamUrl(initialCachedSources.directStreamUrl)
-      ? initialCachedSources.directStreamUrl
-      : '';
+  const initialCandidates = buildDirectCandidates(
+    initialCachedSources,
+    providerCfg.subFile || '',
+    providerCfg.subLabel || 'English'
+  );
+  const firstInitialCandidate = initialCandidates[0];
+  const initialDirectUrl = firstInitialCandidate?.url || '';
 
   const [playerMode, setPlayerMode] = useState<'stream' | 'native' | 'offline'>(() =>
     isOffline && hasPlayableDownloadedFile
       ? 'offline'
-      : initialDirectUrl || isDirectStreamUrl(media.videoPreviewUrl)
+      : initialDirectUrl
       ? 'native'
       : 'stream'
   );
-
-  const [providerCfg] = useState(() => getVideoProviderConfig());
 
   const hasImmediateTmdbId = Boolean(
     media.tmdbId || /^tmdb-(?:movie|tv)-\d+/i.test(media.id || '') || /^\d+$/.test(media.id || '')
@@ -136,8 +188,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [isResolvingServer, setIsResolvingServer] = useState<boolean>(
     () =>
       !(isOffline && hasPlayableDownloadedFile) &&
-      !initialDirectUrl &&
-      !isDirectStreamUrl(media.videoPreviewUrl)
+      !initialDirectUrl
   );
   const [serverQueue, setServerQueue] = useState<AnyServerId[]>(() => {
     const cachedList = initialCachedSources?.availableServers?.filter(
@@ -154,18 +205,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [iframeKey, setIframeKey] = useState<number>(0);
   const [iframeLoaded, setIframeLoaded] = useState<boolean>(false);
   const [revealTimedOut, setRevealTimedOut] = useState<boolean>(false);
+  const [directCandidates, setDirectCandidates] = useState<DirectStreamCandidate[]>(initialCandidates);
+  const [directCandidateIdx, setDirectCandidateIdx] = useState<number>(0);
   const [directStreamUrl, setDirectStreamUrl] = useState<string>(initialDirectUrl);
   const [directSubtitleUrl, setDirectSubtitleUrl] = useState<string>(
-    initialCachedSources?.directStreamSubtitleUrl || ''
+    firstInitialCandidate?.subtitleUrl || ''
   );
   const [directSubtitleLabel, setDirectSubtitleLabel] = useState<string>(
-    initialCachedSources?.directStreamSubtitleLabel || 'Subtitles'
+    firstInitialCandidate?.subtitleLabel || 'Subtitles'
   );
   const [directReferer, setDirectReferer] = useState<string>(
-    initialCachedSources?.directStreamReferer || ''
+    firstInitialCandidate?.referer || ''
   );
   const [useProxyForNative, setUseProxyForNative] = useState<boolean>(() =>
-    Boolean(initialCachedSources?.directStreamReferer)
+    firstInitialCandidate
+      ? firstInitialCandidate.needsProxy ?? Boolean(firstInitialCandidate.referer)
+      : false
   );
   const [liveSources, setLiveSources] = useState<LiveServerSourcesResponse | null>(
     initialCachedSources
@@ -235,21 +290,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     const applyResolvedSources = (res: LiveServerSourcesResponse, canSkipReset: boolean) => {
       setLiveSources(res);
-      const resolvedSub = res.directStreamSubtitleUrl || providerCfg.subFile || '';
-      const resolvedSubLabel = res.directStreamSubtitleLabel || providerCfg.subLabel || 'English';
-      const resolvedRef = res.directStreamReferer || '';
+      const candidates = buildDirectCandidates(
+        res,
+        providerCfg.subFile || '',
+        providerCfg.subLabel || 'English'
+      );
+      setDirectCandidates(candidates);
+      setDirectCandidateIdx(0);
 
-      setDirectSubtitleUrl(resolvedSub);
-      setDirectSubtitleLabel(resolvedSubLabel);
-      setDirectReferer(resolvedRef);
+      const primaryCand = candidates[0];
+      setDirectSubtitleUrl(primaryCand?.subtitleUrl || res.directStreamSubtitleUrl || providerCfg.subFile || '');
+      setDirectSubtitleLabel(
+        primaryCand?.subtitleLabel || res.directStreamSubtitleLabel || providerCfg.subLabel || 'English'
+      );
+      setDirectReferer(primaryCand?.referer || res.directStreamReferer || '');
 
-      const candidateDirect =
-        (res.directStreamUrl && isDirectStreamUrl(res.directStreamUrl) ? res.directStreamUrl : '') ||
-        (isDirectStreamUrl(media.videoPreviewUrl) ? media.videoPreviewUrl || '' : '');
-
-      if (candidateDirect) {
-        setDirectStreamUrl(candidateDirect);
-        setUseProxyForNative(Boolean(resolvedRef));
+      if (primaryCand?.url) {
+        setDirectStreamUrl(primaryCand.url);
+        setUseProxyForNative(primaryCand.needsProxy ?? Boolean(primaryCand.referer));
         setPlayerMode('native');
         setIsResolvingServer(false);
         return;
@@ -318,7 +376,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, providerCfg.subFile, providerCfg.subLabel, providerCfg.vidukiServer]);
+  }, [media, currentSeason, currentEpisode, isOffline, hasPlayableDownloadedFile, providerCfg.subFile, providerCfg.subLabel, providerCfg.vidukiServer, buildDirectCandidates]);
 
   // Never keep the stream embed hidden behind the loading curtain if a subresource tracker stalls onload
   useEffect(() => {
@@ -763,15 +821,46 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   const handleNativeSourceError = useCallback(() => {
     if (playerMode !== 'native') return;
+
+    // Step 1: If direct CDN bypassed proxy and failed (e.g. strict CORS), retry via proxy cleanly
     if (!useProxyForNative && rawNativeSource.startsWith('http')) {
       setUseProxyForNative(true);
       setIsLoading(true);
       return;
     }
-    setPlayerMode('stream');
-  }, [playerMode, useProxyForNative, rawNativeSource]);
 
-  // Native HTML5 / HLS video engine with multi-quality, audio & subtitle track extraction
+    // Step 2: Seamlessly promote to next verified direct HLS/MP4 candidate (e.g. rogflix / onehd)
+    const nextIdx = directCandidateIdx + 1;
+    if (nextIdx < directCandidates.length) {
+      const nextCand = directCandidates[nextIdx];
+      const currentProgress = videoRef.current?.currentTime || 0;
+      if (currentProgress > 5) {
+        setStartAtSeconds(Math.floor(currentProgress));
+        resumeAppliedRef.current = false;
+      }
+      setDirectCandidateIdx(nextIdx);
+      setDirectStreamUrl(nextCand.url);
+      setDirectSubtitleUrl(nextCand.subtitleUrl || providerCfg.subFile || '');
+      setDirectSubtitleLabel(nextCand.subtitleLabel || providerCfg.subLabel || 'English');
+      setDirectReferer(nextCand.referer || '');
+      setUseProxyForNative(nextCand.needsProxy ?? Boolean(nextCand.referer));
+      setIsLoading(true);
+      return;
+    }
+
+    // Step 3: Final fallback to verified embed queue if all direct streams fail
+    setPlayerMode('stream');
+  }, [
+    playerMode,
+    useProxyForNative,
+    rawNativeSource,
+    directCandidateIdx,
+    directCandidates,
+    providerCfg.subFile,
+    providerCfg.subLabel,
+  ]);
+
+  // Native HTML5 / HLS video engine with smart ABR, codec preference, buffer stability & recovery
   useEffect(() => {
     if (playerMode !== 'native' && playerMode !== 'offline') return;
     const video = videoRef.current;
@@ -817,17 +906,39 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     if (looksLikeHls && Hls.isSupported()) {
       if (hlsRef.current) hlsRef.current.destroy();
+
+      const supportsHevc =
+        typeof MediaSource !== 'undefined' &&
+        (MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L90.90"') ||
+          MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L90.90"'));
+
+      const initialSeek = startAtSeconds > 5 ? startAtSeconds : -1;
+      let mediaRecoveryCount = 0;
+      let steppedDownNetworkError = false;
+
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
         startLevel: -1,
-        maxBufferLength: 24,
-        maxMaxBufferLength: 60,
+        capLevelToPlayerSize: true,
+        abrEwmaDefaultEstimate: 5_000_000, // Balanced 5 Mbps estimate avoids slow 4K cold-start stalls
+        abrEwmaFastVoD: 3,
+        abrEwmaSlowVoD: 9,
+        abrBandWidthFactor: 0.9,
+        abrBandWidthUpFactor: 0.7,
+        startPosition: initialSeek,
+        maxBufferLength: 35,
+        maxMaxBufferLength: 90,
+        maxBufferHole: 0.5,
+        nudgeMaxRetry: 5,
         manifestLoadingTimeOut: 12000,
         manifestLoadingMaxRetry: 3,
+        manifestLoadingRetryDelay: 500,
         levelLoadingTimeOut: 12000,
-        fragLoadingTimeOut: 15000,
-        fragLoadingMaxRetry: 4,
+        levelLoadingMaxRetry: 3,
+        fragLoadingTimeOut: 18000,
+        fragLoadingMaxRetry: 5,
+        fragLoadingRetryDelay: 500,
         backBufferLength: 60,
       });
 
@@ -835,12 +946,34 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, (_ev, data) => {
-        const levels: HlsQualityOption[] = data.levels
-          .map((lvl, index) => ({
+        if (initialSeek > 5) {
+          resumeAppliedRef.current = true;
+        }
+        const avcIndices: number[] = [];
+        const rawLevels = data.levels.map((lvl, index) => {
+          const codecStr = `${lvl.videoCodec || ''} ${lvl.codecSet || ''}`.toLowerCase();
+          const isHevcLevel = /(hvc1|hev1)/.test(codecStr);
+          if (!isHevcLevel) avcIndices.push(index);
+          return { lvl, index, isHevcLevel };
+        });
+
+        const playableLevels =
+          !supportsHevc && avcIndices.length > 0
+            ? rawLevels.filter((item) => !item.isHevcLevel)
+            : rawLevels;
+
+        // If browser doesn't decode HEVC cleanly and H.264 levels exist, lock to highest compatible H.264
+        if (!supportsHevc && avcIndices.length > 0 && avcIndices.length < rawLevels.length) {
+          hls.nextLevel = avcIndices[avcIndices.length - 1];
+        }
+
+        const levels: HlsQualityOption[] = playableLevels
+          .map(({ lvl, index }) => ({
             index,
             label: lvl.height ? `${lvl.height}p` : `${Math.round(lvl.bitrate / 1000)} kbps`,
           }))
           .reverse();
+
         setQualityLevels(levels);
         attemptAutoPlay();
       });
@@ -865,11 +998,31 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       });
 
       hls.on(Hls.Events.ERROR, (_ev, data) => {
-        if (!data.fatal) return;
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        if (!data.fatal) {
+          if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR && !video.paused) {
+            hls.startLoad();
+          }
+          return;
+        }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveryCount < 2) {
+          mediaRecoveryCount += 1;
           hls.recoverMediaError();
           return;
         }
+
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !steppedDownNetworkError) {
+          steppedDownNetworkError = true;
+          if (hls.currentLevel > 0) {
+            const lowerLevel = hls.currentLevel - 1;
+            hls.nextLevel = lowerLevel;
+            hls.currentLevel = lowerLevel;
+            setSelectedQualityIndex(lowerLevel);
+          }
+          hls.startLoad();
+          return;
+        }
+
         hls.destroy();
         handleNativeSourceError();
       });
@@ -894,7 +1047,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       video.removeAttribute('src');
       video.load();
     };
-  }, [playerMode, rawNativeSource, effectiveNativeSource, handleNativeSourceError]);
+  }, [playerMode, rawNativeSource, effectiveNativeSource, startAtSeconds, handleNativeSourceError]);
 
   const handleTimeUpdate = () => {
     const video = videoRef.current;

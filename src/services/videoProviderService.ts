@@ -1,5 +1,5 @@
 import { MediaItem } from '../types';
-import { wrapWithEmbedShieldProxy } from '../utils/adBlocker';
+import { prewarmStreamUrl, wrapWithEmbedShieldProxy } from '../utils/adBlocker';
 
 export type VideoStreamProvider =
   | 'vidsrc_su'
@@ -143,12 +143,12 @@ export function isAdFreeServer(serverId: AnyServerId): boolean {
 
 export function getNextFastestServer(currentServer: AnyServerId): AnyServerId {
   const order: AnyServerId[] = [
-    'vidsrc_su',
-    'vidsrc_sh',
     'autoembed',
+    'vidsrc_sh',
     'vidlink',
-    'vidnest',
     'vidsrc_wtf',
+    'vidnest',
+    'vidsrc_su',
     'vixsrc',
     'vidsrc',
   ];
@@ -233,8 +233,8 @@ const STORAGE_KEY_RESUME_PREFIX = 'mullahmax_resume_sec_';
 export const STORAGE_KEY_VIDLINK_PROGRESS = 'vidLinkProgress';
 
 const DEFAULT_CONFIG: VideoProviderConfig = {
-  provider: 'vidsrc_su',
-  vidukiServer: 'vidsrc_su',
+  provider: 'autoembed',
+  vidukiServer: 'autoembed',
   accentColor: 'FFFFFF',
   secondaryColor: '3F3F46',
   iconColor: 'FFFFFF',
@@ -803,11 +803,23 @@ export interface SavedDirectStreamRecord {
   updatedAt?: string;
 }
 
+export interface DirectStreamCandidate {
+  url: string;
+  subtitleUrl?: string;
+  subtitleLabel?: string;
+  referer?: string;
+  needsProxy?: boolean;
+  codec?: string;
+}
+
 export interface LiveServerSourcesResponse {
   directStreamUrl?: string;
   directStreamSubtitleUrl?: string;
   directStreamSubtitleLabel?: string;
   directStreamReferer?: string;
+  directStreamNeedsProxy?: boolean;
+  directStreamCodec?: string;
+  directStreamFallbacks?: DirectStreamCandidate[];
   vidlinkAvailable: boolean;
   vidfastAvailable?: boolean;
   videasyAvailable?: boolean;
@@ -940,10 +952,11 @@ export async function removeCustomDirectStream(
 
 const clientSourcesCache = new Map<
   string,
-  { data: LiveServerSourcesResponse; fetchedAt: number }
+  { data: LiveServerSourcesResponse; fetchedAt: number; ttlMs: number }
 >();
 const clientSourcesInflight = new Map<string, Promise<LiveServerSourcesResponse>>();
 const CLIENT_SOURCES_TTL_MS = 5 * 60 * 1000;
+const CLIENT_SOURCES_NEGATIVE_TTL_MS = 15 * 1000;
 
 function makeClientSourcesCacheKey(media: MediaItem, season: number, episode: number): string {
   const targetId = resolveTargetIdentifier(media);
@@ -967,7 +980,7 @@ export function getCachedLiveServerSources(
 ): LiveServerSourcesResponse | null {
   const key = makeClientSourcesCacheKey(media, season, episode);
   const cached = clientSourcesCache.get(key);
-  if (cached && Date.now() - cached.fetchedAt < CLIENT_SOURCES_TTL_MS) {
+  if (cached && Date.now() - cached.fetchedAt < cached.ttlMs) {
     return cached.data;
   }
   return null;
@@ -990,7 +1003,7 @@ export async function fetchLiveServerSources(
   const cached = clientSourcesCache.get(key);
   if (
     cached &&
-    Date.now() - cached.fetchedAt < CLIENT_SOURCES_TTL_MS &&
+    Date.now() - cached.fetchedAt < cached.ttlMs &&
     (fast || cached.data.primeSrcHosts.length > 0)
   ) {
     return cached.data;
@@ -1024,11 +1037,27 @@ export async function fetchLiveServerSources(
       const contentType = (res.headers.get('content-type') || '').toLowerCase();
       if (res.ok && contentType.includes('application/json')) {
         const data = (await res.json()) as Partial<LiveServerSourcesResponse>;
+        const normalizedFallbacks: DirectStreamCandidate[] = Array.isArray(
+          data.directStreamFallbacks
+        )
+          ? data.directStreamFallbacks.filter(
+              (item): item is DirectStreamCandidate =>
+                Boolean(item && typeof item === 'object' && typeof item.url === 'string' && item.url.trim())
+            )
+          : [];
+
         const normalized: LiveServerSourcesResponse = {
           directStreamUrl: data.directStreamUrl,
           directStreamSubtitleUrl: data.directStreamSubtitleUrl,
           directStreamSubtitleLabel: data.directStreamSubtitleLabel,
           directStreamReferer: data.directStreamReferer,
+          directStreamNeedsProxy:
+            typeof data.directStreamNeedsProxy === 'boolean'
+              ? data.directStreamNeedsProxy
+              : undefined,
+          directStreamCodec:
+            typeof data.directStreamCodec === 'string' ? data.directStreamCodec : undefined,
+          directStreamFallbacks: normalizedFallbacks,
           vidlinkAvailable: Boolean(data.vidlinkAvailable),
           vidfastAvailable: Boolean(data.vidfastAvailable),
           videasyAvailable: Boolean(data.videasyAvailable),
@@ -1040,7 +1069,21 @@ export async function fetchLiveServerSources(
           resolvedMalId: typeof data.resolvedMalId === 'number' ? data.resolvedMalId : undefined,
           recommendedServer: data.recommendedServer,
         };
-        clientSourcesCache.set(key, { data: normalized, fetchedAt: Date.now() });
+
+        if (normalized.directStreamUrl && normalized.directStreamNeedsProxy === false) {
+          prewarmStreamUrl(normalized.directStreamUrl);
+        }
+        for (const fb of normalizedFallbacks) {
+          if (fb.needsProxy === false) prewarmStreamUrl(fb.url);
+        }
+
+        clientSourcesCache.set(key, {
+          data: normalized,
+          fetchedAt: Date.now(),
+          ttlMs: normalized.directStreamUrl
+            ? CLIENT_SOURCES_TTL_MS
+            : CLIENT_SOURCES_NEGATIVE_TTL_MS,
+        });
         return normalized;
       }
     } catch (err) {
@@ -1052,8 +1095,8 @@ export async function fetchLiveServerSources(
     return {
       vidlinkAvailable: true,
       vixsrcAvailable: false,
-      recommendedServer: 'vidsrc_su',
-      availableServers: ['vidsrc_su', 'vidsrc_sh', 'autoembed', 'vidlink', 'vidnest'],
+      recommendedServer: 'autoembed',
+      availableServers: ['autoembed', 'vidsrc_sh', 'vidlink', 'vidsrc_wtf', 'vidnest'],
       primeSrcHosts: [],
     };
   })();
