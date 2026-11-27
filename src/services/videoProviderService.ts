@@ -1086,9 +1086,10 @@ export async function fetchLiveServerSources(
         clientSourcesCache.set(key, {
           data: normalized,
           fetchedAt: Date.now(),
-          ttlMs: normalized.directStreamUrl
-            ? CLIENT_SOURCES_TTL_MS
-            : CLIENT_SOURCES_NEGATIVE_TTL_MS,
+          ttlMs:
+            normalized.directStreamUrl || (normalized.availableServers && normalized.availableServers.length > 0)
+              ? CLIENT_SOURCES_TTL_MS
+              : CLIENT_SOURCES_NEGATIVE_TTL_MS,
         });
         return normalized;
       }

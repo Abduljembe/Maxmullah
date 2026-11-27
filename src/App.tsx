@@ -19,13 +19,12 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { MediaItem, StreamingPlatform } from './types';
-import { MEDIA_CATALOG, PLATFORM_INFO } from './data/mediaData';
+import { MEDIA_CATALOG } from './data/mediaData';
 import { ProfileProvider, useProfile } from './context/ProfileContext';
 import { OfflineProvider, useOffline } from './context/OfflineContext';
 import { TopBar } from './components/navigation/TopBar';
 import { OfflineBanner } from './components/pwa/OfflineBanner';
 import { HeroSpotlight } from './components/hero/HeroSpotlight';
-import { PlatformFilterBar } from './components/navigation/PlatformFilterBar';
 import { MediaCard } from './components/cards/MediaCard';
 import { MediaDetailModal } from './components/modals/MediaDetailModal';
 import { VideoPlayerModal } from './components/player/VideoPlayerModal';
@@ -397,12 +396,6 @@ function MainAppContent() {
               onExploreSeries={() => setCurrentTab('series')}
             />
 
-            {/* Platform Filter Bar */}
-            <PlatformFilterBar
-              selectedPlatform={selectedPlatform}
-              onSelectPlatform={setSelectedPlatform}
-            />
-
             {/* Continue Watching (Synced Live with VidLink MEDIA_DATA) */}
             {vidLinkContinueWatching.length > 0 && (
               <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-3">
@@ -493,52 +486,6 @@ function MainAppContent() {
                 </div>
               </div>
             )}
-
-            {/* Section 6: Browse by Streaming Network Showcase */}
-            <div className="w-full px-4 sm:px-8 md:px-12 lg:px-16 xl:px-20 max-w-[2400px] mx-auto space-y-4 pt-4">
-              <h2 className="text-xl sm:text-2xl font-black text-white font-display">
-                All Major Platforms Under One Roof
-              </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-8 gap-3.5 sm:gap-4">
-                {Object.entries(PLATFORM_INFO).map(([key, info]) => {
-                  const plat = key as StreamingPlatform;
-                  const count = MEDIA_CATALOG.filter((m) => m.platforms.includes(plat)).length;
-
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => {
-                        setSelectedPlatform(plat);
-                        setCurrentTab('networks');
-                      }}
-                      className="p-4 rounded-2xl border text-left transition-all hover:-translate-y-1 cursor-pointer flex flex-col justify-between h-28 group"
-                      style={{
-                        backgroundColor: info.bgColor,
-                        borderColor: info.borderColor,
-                      }}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span
-                          className="w-3 h-3 rounded-full"
-                          style={{ backgroundColor: info.color }}
-                        />
-                        <span className="text-[11px] font-mono text-slate-300">
-                          {count} titles
-                        </span>
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-extrabold text-white font-display">
-                          {info.name}
-                        </h3>
-                        <p className="text-[11px] text-slate-300 line-clamp-1 mt-0.5">
-                          {info.description}
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
 
             {/* Endless Discovery Grid: keeps loading more movies as you scroll down on Home */}
             <HomeInfiniteCatalogGrid

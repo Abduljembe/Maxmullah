@@ -74,27 +74,6 @@ export async function fetchServerQualities(
   const renditions: ServerQualityRendition[] = [];
 
   renditions.push({
-    id: '360p',
-    label: '360p Mobile Saver',
-    height: 360,
-    bitrateKbps: 800,
-    sizeMb: Math.round(durationMinutes * 6),
-    codec: 'H.264 / AAC',
-    fps: 24,
-    badge: 'Fastest',
-  });
-
-  renditions.push({
-    id: '480p',
-    label: '480p Standard Definition',
-    height: 480,
-    bitrateKbps: 1400,
-    sizeMb: Math.round(durationMinutes * 10.5),
-    codec: 'H.264 / AAC',
-    fps: 24,
-  });
-
-  renditions.push({
     id: '720p',
     label: '720p High Definition',
     height: 720,
@@ -102,7 +81,7 @@ export async function fetchServerQualities(
     sizeMb: detected720Mb || Math.round(durationMinutes * 21),
     codec: 'H.264 / AC3',
     fps: 30,
-    badge: !is4KMaster ? 'Standard' : undefined,
+    badge: !is4KMaster ? 'Min HD' : undefined,
   });
 
   if (!isVintage || is4KMaster || detected1080Mb) {

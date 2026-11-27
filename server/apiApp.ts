@@ -670,6 +670,58 @@ async function fetchWithValidatedRedirects(
   return null;
 }
 
+function parseStreamQualityHeight(rawText: string): number {
+  const resMatch = rawText.match(/RESOLUTION\s*=\s*\d+x(\d+)/i);
+  if (resMatch) {
+    const h = parseInt(resMatch[1], 10);
+    if (Number.isFinite(h) && h > 0) return h;
+  }
+  const lower = rawText.toLowerCase();
+  if (/(?:^|[^\d])(2160p?|4k|uhd)(?:[^\d]|$)/.test(lower)) return 2160;
+  if (/(?:^|[^\d])1440p?(?:[^\d]|$)/.test(lower)) return 1440;
+  if (/(?:^|[^\d])(1080p?|fhd|full\s*hd)(?:[^\d]|$)/.test(lower)) return 1080;
+  if (/(?:^|[^\d])(720p?)(?:[^\d]|$)/.test(lower)) return 720;
+  if (/(?:^|[^\d])540p?(?:[^\d]|$)/.test(lower)) return 540;
+  if (/(?:^|[^\d])480p?(?:[^\d]|$)/.test(lower)) return 480;
+  if (/(?:^|[^\d])360p?(?:[^\d]|$)/.test(lower)) return 360;
+  if (/(?:^|[^\d])240p?(?:[^\d]|$)/.test(lower)) return 240;
+  return 0;
+}
+
+function filterMasterHlsHdVariants(lines: string[]): string[] {
+  const variantBlocks: Array<{ startIdx: number; endIdx: number; height: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed.startsWith('#EXT-X-STREAM-INF')) continue;
+    const height = parseStreamQualityHeight(trimmed);
+    let uriIdx = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const nextTrimmed = lines[j].trim();
+      if (!nextTrimmed || nextTrimmed.startsWith('#')) continue;
+      uriIdx = j;
+      break;
+    }
+    const endIdx = uriIdx >= 0 ? uriIdx : i;
+    variantBlocks.push({ startIdx: i, endIdx, height });
+    i = endIdx;
+  }
+
+  if (variantBlocks.length === 0) return lines;
+  const hasHdVariant = variantBlocks.some((b) => b.height >= 720);
+  if (!hasHdVariant) return lines;
+
+  const dropLineIndices = new Set<number>();
+  for (const block of variantBlocks) {
+    if (block.height > 0 && block.height < 720) {
+      for (let idx = block.startIdx; idx <= block.endIdx; idx++) {
+        dropLineIndices.add(idx);
+      }
+    }
+  }
+  if (dropLineIndices.size === 0) return lines;
+  return lines.filter((_line, idx) => !dropLineIndices.has(idx));
+}
+
 function rewriteHlsPlaylistForProxy(
   playlistText: string,
   baseUrl: URL,
@@ -686,8 +738,8 @@ function rewriteHlsPlaylistForProxy(
     }
   };
 
-  return playlistText
-    .split(/\r?\n/)
+  const filteredLines = filterMasterHlsHdVariants(playlistText.split(/\r?\n/));
+  return filteredLines
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed) return line;
@@ -965,15 +1017,49 @@ async function resolvePublicDirectStream(
       let streamUrl = typeof data.url === 'string' ? data.url.trim() : '';
       let customRef = candidate.defaultReferer;
       let explicitRefererNeeded = false;
-      if (!streamUrl && Array.isArray(data.streams)) {
-        const firstValid = data.streams.find(
-          (s): s is { url?: string; headers?: { Referer?: string } } =>
-            Boolean(s && typeof s === 'object' && typeof (s as { url?: unknown }).url === 'string')
-        );
-        if (firstValid?.url) {
-          streamUrl = firstValid.url.trim();
-          if (firstValid.headers?.Referer) {
-            customRef = firstValid.headers.Referer;
+      let chosenArrayStreamHeight = 0;
+
+      if (Array.isArray(data.streams) && data.streams.length > 0) {
+        type CandidateStreamItem = {
+          url?: string;
+          quality?: string | number;
+          label?: string;
+          resolution?: string;
+          headers?: { Referer?: string };
+        };
+        const scoredStreams = data.streams
+          .filter(
+            (s): s is CandidateStreamItem =>
+              Boolean(s && typeof s === 'object' && typeof (s as { url?: unknown }).url === 'string' && (s as { url: string }).url.trim())
+          )
+          .map((s) => {
+            const labelText = `${s.quality ?? ''} ${s.label ?? ''} ${s.resolution ?? ''} ${s.url ?? ''}`;
+            const height = parseStreamQualityHeight(labelText);
+            const score =
+              height === 1080
+                ? 100
+                : height >= 1440
+                  ? 90
+                  : height >= 720
+                    ? 80
+                    : height === 0
+                      ? 25
+                      : height - 1000;
+            return { s, height, score };
+          })
+          .sort((a, b) => b.score - a.score);
+
+        const bestEntry = scoredStreams[0];
+        const topLevelHeight = streamUrl ? parseStreamQualityHeight(streamUrl) : 0;
+        const shouldUseArrayEntry =
+          bestEntry?.s.url &&
+          (!streamUrl || (topLevelHeight > 0 && topLevelHeight < 720 && bestEntry.height >= 720) || (bestEntry.height >= 720 && topLevelHeight === 0));
+
+        if (shouldUseArrayEntry && bestEntry?.s.url) {
+          streamUrl = bestEntry.s.url.trim();
+          chosenArrayStreamHeight = bestEntry.height;
+          if (bestEntry.s.headers?.Referer) {
+            customRef = bestEntry.s.headers.Referer;
             explicitRefererNeeded = true;
           }
         }
@@ -1007,6 +1093,10 @@ async function resolvePublicDirectStream(
       const needsProxy = explicitRefererNeeded || acao !== '*' || vary.includes('origin');
 
       let detectedCodec: DirectStreamCodec = isMp4 ? 'mp4' : 'hls';
+      let maxDetectedHeight = Math.max(
+        chosenArrayStreamHeight,
+        parseStreamQualityHeight(validStream.toString())
+      );
       if (!isMp4) {
         const snippet = (await verifyRes.text()).trimStart();
         if (!snippet.startsWith('#EXTM3U')) return null;
@@ -1016,6 +1106,13 @@ async function resolvePublicDirectStream(
           detectedCodec = 'h264';
         } else if (hasHevc) {
           detectedCodec = 'hevc';
+        }
+        const resMatches = Array.from(snippet.matchAll(/RESOLUTION\s*=\s*\d+x(\d+)/gi));
+        for (const match of resMatches) {
+          const parsedH = parseInt(match[1], 10);
+          if (Number.isFinite(parsedH) && parsedH > maxDetectedHeight) {
+            maxDetectedHeight = parsedH;
+          }
         }
       }
 
@@ -1042,11 +1139,19 @@ async function resolvePublicDirectStream(
         }
       }
 
+      const qualityWeight =
+        maxDetectedHeight >= 1000
+          ? -6
+          : maxDetectedHeight >= 720
+            ? -3
+            : maxDetectedHeight > 0 && maxDetectedHeight < 720
+              ? 20
+              : 0;
       const codecWeight =
         detectedCodec === 'h264' ? 0 : detectedCodec === 'mp4' || detectedCodec === 'hls' ? 2 : 10;
       const hostWeight = candidate.id === 'flixhq' ? 0 : candidate.id === 'rogflix' ? 1 : 2;
       const directBonus = needsProxy ? 0 : -1;
-      const rank = codecWeight + hostWeight + directBonus;
+      const rank = qualityWeight + codecWeight + hostWeight + directBonus;
 
       return {
         rank,
@@ -1652,7 +1757,10 @@ export function createApiApp(existingApp?: express.Express): express.Express {
       sourcesResponseCache.set(sourceCacheKey, {
         data: payload,
         fetchedAt: Date.now(),
-        ttlMs: directResolution ? SOURCES_CACHE_TTL_MS : SOURCES_NEGATIVE_CACHE_TTL_MS,
+        ttlMs:
+          directResolution || availableServers.length > 0
+            ? SOURCES_CACHE_TTL_MS
+            : SOURCES_NEGATIVE_CACHE_TTL_MS,
       });
       res.json(payload);
     } catch (err) {
@@ -1890,8 +1998,8 @@ export function createApiApp(existingApp?: express.Express): express.Express {
 
       if (ct.includes('mpegurl') || subpath.endsWith('.m3u8')) {
         const playlist = await upstream.text();
-        const rewritten = playlist
-          .split(/\r?\n/)
+        const filteredLines = filterMasterHlsHdVariants(playlist.split(/\r?\n/));
+        const rewritten = filteredLines
           .map((line) => {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith('#')) return line;
